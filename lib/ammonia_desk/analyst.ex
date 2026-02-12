@@ -6,7 +6,6 @@ defmodule AmmoniaDesk.Analyst do
 
   require Logger
 
-  @anthropic_api_key System.get_env("ANTHROPIC_API_KEY")
   @model "claude-sonnet-4-20250514"
 
   @doc """
@@ -156,8 +155,10 @@ defmodule AmmoniaDesk.Analyst do
   # --- Private ---
 
   defp call_claude(prompt) do
-    if is_nil(@anthropic_api_key) do
-      Logger.warn("ANTHROPIC_API_KEY not set, skipping analyst explanation")
+    api_key = System.get_env("ANTHROPIC_API_KEY")
+
+    if is_nil(api_key) do
+      Logger.warning("ANTHROPIC_API_KEY not set, skipping analyst explanation")
       {:error, :no_api_key}
     else
       case Req.post("https://api.anthropic.com/v1/messages",
@@ -167,7 +168,7 @@ defmodule AmmoniaDesk.Analyst do
           messages: [%{role: "user", content: prompt}]
         },
         headers: [
-          {"x-api-key", @anthropic_api_key},
+          {"x-api-key", api_key},
           {"anthropic-version", "2023-06-01"}
         ],
         receive_timeout: 10_000
