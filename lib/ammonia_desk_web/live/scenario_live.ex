@@ -49,6 +49,8 @@ defmodule AmmoniaDesk.ScenarioLive do
       |> assign(:solving, false)
       |> assign(:active_tab, :trader)
       |> assign(:agent_history, [])
+      |> assign(:explanation, nil)
+      |> assign(:explaining, false)
 
     {:ok, socket}
   end
@@ -191,7 +193,16 @@ defmodule AmmoniaDesk.ScenarioLive do
   def handle_info(:do_solve, socket) do
     case Solver.solve(socket.assigns.current_vars) do
       {:ok, result} ->
-        {:noreply, assign(socket, result: result, solving: false)}
+        socket = assign(socket, result: result, solving: false, explanation: nil, explaining: true)
+        vars = socket.assigns.current_vars
+        lv_pid = self()
+        spawn(fn ->
+          case AmmoniaDesk.Analyst.explain_solve(vars, result) do
+            {:ok, text} -> send(lv_pid, {:explanation_result, text})
+            _ -> send(lv_pid, {:explanation_result, nil})
+          end
+        end)
+        {:noreply, socket}
       {:error, _reason} ->
         {:noreply, assign(socket, solving: false)}
     end
@@ -201,7 +212,16 @@ defmodule AmmoniaDesk.ScenarioLive do
   def handle_info(:do_monte_carlo, socket) do
     case Solver.monte_carlo(socket.assigns.current_vars) do
       {:ok, dist} ->
-        {:noreply, assign(socket, distribution: dist, solving: false)}
+        socket = assign(socket, distribution: dist, solving: false, explanation: nil, explaining: true)
+        vars = socket.assigns.current_vars
+        lv_pid = self()
+        spawn(fn ->
+          case AmmoniaDesk.Analyst.explain_distribution(vars, dist) do
+            {:ok, text} -> send(lv_pid, {:explanation_result, text})
+            _ -> send(lv_pid, {:explanation_result, nil})
+          end
+        end)
+        {:noreply, socket}
       {:error, _reason} ->
         {:noreply, assign(socket, solving: false)}
     end
@@ -221,6 +241,22 @@ defmodule AmmoniaDesk.ScenarioLive do
       |> assign(:auto_result, result)
       |> assign(:agent_history, history)
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:explanation_result, text}, socket) do
+    {:noreply, assign(socket, explanation: text, explaining: false)}
+  end
+
+  @impl true
+  def handle_info({:auto_explanation, text}, socket) do
+    auto_result =
+      if socket.assigns.auto_result do
+        Map.put(socket.assigns.auto_result, :explanation, text)
+      else
+        nil
+      end
+    {:noreply, assign(socket, :auto_result, auto_result)}
   end
 
   # --- Render ---

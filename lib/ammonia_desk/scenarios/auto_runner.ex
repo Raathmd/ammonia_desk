@@ -113,17 +113,32 @@ defmodule AmmoniaDesk.Scenarios.AutoRunner do
           distribution: distribution,
           center: live_vars,
           timestamp: DateTime.utc_now(),
-          triggers: triggers
+          triggers: triggers,
+          explanation: nil  # filled async
         }
 
-        # Add to history (keep last 20)
-        new_history = [result | state.history] |> Enum.take(20)
-
+        # Broadcast result immediately (no waiting for Claude)
         Phoenix.PubSub.broadcast(
           AmmoniaDesk.PubSub,
           "auto_runner",
           {:auto_result, result}
         )
+
+        # Spawn explanation — broadcasts update when ready
+        spawn(fn ->
+          case AmmoniaDesk.Analyst.explain_agent(result) do
+            {:ok, text} ->
+              Phoenix.PubSub.broadcast(
+                AmmoniaDesk.PubSub,
+                "auto_runner",
+                {:auto_explanation, text}
+              )
+            _ -> :ok
+          end
+        end)
+
+        # Add to history (keep last 20)
+        new_history = [result | state.history] |> Enum.take(20)
 
         trigger_msg = if length(triggers) > 0 do
           " (triggered by #{Enum.map_join(triggers, ", ", & &1.key)})"
