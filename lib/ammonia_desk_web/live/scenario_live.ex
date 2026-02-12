@@ -423,6 +423,21 @@ defmodule AmmoniaDesk.ScenarioLive do
               </div>
             <% end %>
 
+            <%!-- AI Explanation --%>
+            <div style="background:#0f1729;border:1px solid #1e293b;border-radius:8px;padding:12px;margin-bottom:16px">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+                <span style="font-size:11px;color:#8b5cf6;font-weight:700;letter-spacing:1px">🧠 ANALYST</span>
+                <%= if @explaining do %>
+                  <span style="font-size:10px;color:#475569">thinking...</span>
+                <% end %>
+              </div>
+              <%= if @explanation do %>
+                <div style="font-size:13px;color:#c8d6e5;line-height:1.5"><%= @explanation %></div>
+              <% else %>
+                <div style="font-size:12px;color:#475569;font-style:italic">Run SOLVE or MONTE CARLO to get analysis</div>
+              <% end %>
+            </div>
+
             <%# Monte Carlo distribution %>
             <%= if @distribution do %>
               <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
@@ -531,6 +546,14 @@ defmodule AmmoniaDesk.ScenarioLive do
                   <% end %>
                 <% end %>
               </div>
+
+              <%!-- Agent AI explanation --%>
+              <%= if @auto_result[:explanation] do %>
+                <div style="background:#0f1729;border:1px solid #1e293b;border-radius:8px;padding:12px;margin-top:12px;margin-bottom:16px">
+                  <div style="font-size:11px;color:#8b5cf6;font-weight:700;letter-spacing:1px;margin-bottom:6px">🧠 AGENT ANALYSIS</div>
+                  <div style="font-size:13px;color:#c8d6e5;line-height:1.5"><%= @auto_result.explanation %></div>
+                </div>
+              <% end %>
 
               <%# Distribution %>
               <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
