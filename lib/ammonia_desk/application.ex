@@ -10,6 +10,8 @@ defmodule AmmoniaDesk.Application do
       AmmoniaDesk.Solver.Port,
       AmmoniaDesk.Scenarios.Store,
       AmmoniaDesk.Scenarios.AutoRunner,
+      AmmoniaDesk.Contracts.Store,
+      {Task.Supervisor, name: AmmoniaDesk.Contracts.TaskSupervisor},
       AmmoniaDesk.Endpoint
     ]
 
