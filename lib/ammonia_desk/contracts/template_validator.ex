@@ -1,18 +1,18 @@
 defmodule AmmoniaDesk.Contracts.TemplateValidator do
   @moduledoc """
-  Validates extracted contract clauses against template requirements.
+  Validates extracted contract clauses against canonical template requirements.
 
   After the parser extracts clauses from a document, this module checks
-  whether the extraction is COMPLETE relative to the contract's template.
+  whether the extraction is COMPLETE relative to the contract's family template.
 
-  Three levels of findings:
+  Four levels of findings:
     :missing_required  — blocks progression past draft. Cannot submit for review.
     :missing_expected  — generates warnings. Legal must acknowledge before approval.
     :low_confidence    — clause was found but extraction confidence is low.
     :value_suspicious  — extracted value is outside normal ranges.
 
-  This is the first quality gate. It runs synchronously after parsing
-  and its results are stored on the contract for display in all role views.
+  This module now works with canonical clause IDs and family signatures
+  from the TemplateRegistry, rather than the old contract_type + incoterm system.
   """
 
   alias AmmoniaDesk.Contracts.{Contract, TemplateRegistry}
@@ -21,6 +21,7 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
 
   @type finding :: %{
     level: :missing_required | :missing_expected | :low_confidence | :value_suspicious,
+    clause_id: String.t() | nil,
     clause_type: atom(),
     parameter_class: atom() | nil,
     message: String.t()
@@ -28,19 +29,19 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
 
   @type validation_result :: %{
     contract_id: String.t(),
-    template_type: atom(),
-    incoterm: atom() | nil,
+    family_id: String.t() | nil,
     findings: [finding()],
     required_met: non_neg_integer(),
     required_total: non_neg_integer(),
     expected_met: non_neg_integer(),
     expected_total: non_neg_integer(),
     completeness_pct: float(),
+    coverage: %{String.t() => boolean()},
     blocks_submission: boolean(),
     validated_at: DateTime.t()
   }
 
-  # Normal value ranges for sanity checks
+  # Normal value ranges for sanity checks on LP-relevant parameters
   @value_ranges %{
     nola_buy: {100.0, 1200.0},
     sell_stl: {100.0, 1500.0},
@@ -53,67 +54,78 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
     inv_geis: {100.0, 100_000.0},
     barge_count: {1.0, 50.0},
     working_cap: {10_000.0, 50_000_000.0},
-    nat_gas: {1.0, 20.0}
+    nat_gas: {1.0, 20.0},
+    total_volume: {100.0, 500_000.0},
+    contract_price: {50.0, 2000.0}
   }
 
   @doc """
-  Validate a contract against its template.
+  Validate a contract against its family template.
 
-  The contract must have template_type set. If incoterm is nil,
-  uses the base template for that contract type.
-
-  Returns a validation_result with findings and completeness metrics.
+  The contract should have a family_id set (from auto-detection or manual selection).
+  Falls back to inferring family from template_type + incoterm if no family_id.
   """
   @spec validate(Contract.t()) :: {:ok, validation_result()} | {:error, term()}
   def validate(%Contract{} = contract) do
-    ct = contract.template_type
-    ic = contract.incoterm
+    family_id = resolve_family_id(contract)
 
-    if is_nil(ct) do
+    if is_nil(family_id) do
       {:error, :no_template_type}
     else
-      case TemplateRegistry.get_template(ct, ic) do
-        {:ok, template} ->
-          findings = run_checks(contract, template)
+      reqs = TemplateRegistry.family_requirements(family_id)
 
-          required_reqs = Enum.filter(template.clause_requirements, &(&1.level == :required))
-          expected_reqs = Enum.filter(template.clause_requirements, &(&1.level in [:required, :expected]))
+      if length(reqs) == 0 do
+        {:error, :unknown_template}
+      else
+        clauses = contract.clauses || []
+        extracted_ids = clauses |> Enum.map(& &1.clause_id) |> Enum.reject(&is_nil/1) |> MapSet.new()
 
-          missing_required = Enum.count(findings, &(&1.level == :missing_required))
-          missing_expected = Enum.count(findings, &(&1.level == :missing_expected))
+        findings =
+          []
+          |> check_coverage(reqs, extracted_ids)
+          |> check_low_confidence(clauses)
+          |> check_value_ranges(clauses)
+          |> check_duplicate_conflicts(clauses)
 
-          required_met = length(required_reqs) - missing_required
-          expected_met = length(expected_reqs) - missing_required - missing_expected
+        required_reqs = Enum.filter(reqs, &(&1.level == :required))
+        expected_reqs = Enum.filter(reqs, &(&1.level == :expected))
 
-          total = length(template.clause_requirements)
-          met = total - missing_required - missing_expected
-          completeness = if total > 0, do: Float.round(met / total * 100, 1), else: 100.0
+        missing_required = Enum.count(findings, &(&1.level == :missing_required))
+        missing_expected = Enum.count(findings, &(&1.level == :missing_expected))
 
-          result = %{
-            contract_id: contract.id,
-            template_type: ct,
-            incoterm: ic,
-            findings: findings,
-            required_met: required_met,
-            required_total: length(required_reqs),
-            expected_met: expected_met,
-            expected_total: length(expected_reqs),
-            completeness_pct: completeness,
-            blocks_submission: missing_required > 0,
-            validated_at: DateTime.utc_now()
-          }
+        required_met = length(required_reqs) - missing_required
+        expected_met = length(expected_reqs) - missing_expected
 
-          {:ok, result}
+        total = length(reqs)
+        met = total - missing_required - missing_expected
+        completeness = if total > 0, do: Float.round(met / total * 100, 1), else: 100.0
 
-        {:error, reason} ->
-          {:error, reason}
+        coverage =
+          Enum.into(reqs, %{}, fn req ->
+            {req.clause_id, MapSet.member?(extracted_ids, req.clause_id)}
+          end)
+
+        result = %{
+          contract_id: contract.id,
+          family_id: family_id,
+          findings: findings,
+          required_met: required_met,
+          required_total: length(required_reqs),
+          expected_met: expected_met,
+          expected_total: length(expected_reqs),
+          completeness_pct: completeness,
+          coverage: coverage,
+          blocks_submission: missing_required > 0,
+          validated_at: DateTime.utc_now()
+        }
+
+        {:ok, result}
       end
     end
   end
 
   @doc """
   Quick check: can this contract be submitted for review?
-  Returns true only if all required clauses are present.
   """
   @spec submission_ready?(Contract.t()) :: boolean()
   def submission_ready?(%Contract{} = contract) do
@@ -131,10 +143,12 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
     case validate(contract) do
       {:ok, result} ->
         {:ok, %{
+          family_id: result.family_id,
           completeness_pct: result.completeness_pct,
           required: "#{result.required_met}/#{result.required_total}",
           expected: "#{result.expected_met}/#{result.expected_total}",
           blocks: result.blocks_submission,
+          coverage: result.coverage,
           missing_required: Enum.filter(result.findings, &(&1.level == :missing_required)),
           missing_expected: Enum.filter(result.findings, &(&1.level == :missing_expected)),
           low_confidence: Enum.filter(result.findings, &(&1.level == :low_confidence)),
@@ -146,69 +160,39 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
 
   # --- Checks ---
 
-  defp run_checks(contract, template) do
-    clauses = contract.clauses || []
-
-    []
-    |> check_required(clauses, template)
-    |> check_expected(clauses, template)
-    |> check_low_confidence(clauses)
-    |> check_value_ranges(clauses)
-    |> check_duplicate_conflicts(clauses)
-  end
-
-  # Check that every required clause type+parameter_class is present
-  defp check_required(findings, clauses, template) do
-    required = Enum.filter(template.clause_requirements, &(&1.level == :required))
-
-    Enum.reduce(required, findings, fn req, acc ->
-      if clause_matches_requirement?(clauses, req) do
+  defp check_coverage(findings, reqs, extracted_ids) do
+    Enum.reduce(reqs, findings, fn req, acc ->
+      if MapSet.member?(extracted_ids, req.clause_id) do
         acc
       else
+        level = if req.level == :required, do: :missing_required, else: :missing_expected
+        label = if req.level == :required, do: "REQUIRED", else: "EXPECTED"
+
         [%{
-          level: :missing_required,
-          clause_type: req.clause_type,
-          parameter_class: req.parameter_class,
-          message: "REQUIRED: #{req.description} — not found in extraction"
+          level: level,
+          clause_id: req.clause_id,
+          clause_type: nil,
+          parameter_class: nil,
+          message: "#{label}: #{req.clause_id} — not found in extraction"
         } | acc]
       end
     end)
   end
 
-  # Check expected (non-required) clauses
-  defp check_expected(findings, clauses, template) do
-    expected = Enum.filter(template.clause_requirements, &(&1.level == :expected))
-
-    Enum.reduce(expected, findings, fn req, acc ->
-      if clause_matches_requirement?(clauses, req) do
-        acc
-      else
-        [%{
-          level: :missing_expected,
-          clause_type: req.clause_type,
-          parameter_class: req.parameter_class,
-          message: "EXPECTED: #{req.description} — not found in extraction"
-        } | acc]
-      end
-    end)
-  end
-
-  # Flag any clause with :low confidence
   defp check_low_confidence(findings, clauses) do
     low_conf = Enum.filter(clauses, &(&1.confidence == :low))
 
     Enum.reduce(low_conf, findings, fn clause, acc ->
       [%{
         level: :low_confidence,
+        clause_id: clause.clause_id,
         clause_type: clause.type,
         parameter_class: clause.parameter,
-        message: "Low confidence extraction: #{clause.type} / #{clause.parameter} " <>
-                 "(section #{clause.reference_section})"
+        message: "Low confidence extraction: #{clause.clause_id} (section #{clause.reference_section})"
       } | acc]
     end)
   end
 
-  # Check extracted values against normal ranges
   defp check_value_ranges(findings, clauses) do
     Enum.reduce(clauses, findings, fn clause, acc ->
       case Map.get(@value_ranges, clause.parameter) do
@@ -217,6 +201,7 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
             clause.value < min * 0.1 ->
               [%{
                 level: :value_suspicious,
+                clause_id: clause.clause_id,
                 clause_type: clause.type,
                 parameter_class: clause.parameter,
                 message: "Value #{clause.value} for #{clause.parameter} is far below " <>
@@ -226,6 +211,7 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
             clause.value > max * 10 ->
               [%{
                 level: :value_suspicious,
+                clause_id: clause.clause_id,
                 clause_type: clause.type,
                 parameter_class: clause.parameter,
                 message: "Value #{clause.value} for #{clause.parameter} is far above " <>
@@ -240,28 +226,24 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
     end)
   end
 
-  # Check for conflicting clauses (same parameter, contradictory operators)
   defp check_duplicate_conflicts(findings, clauses) do
-    by_param = Enum.group_by(clauses, & &1.parameter)
+    by_param = clauses |> Enum.filter(& &1.parameter) |> Enum.group_by(& &1.parameter)
 
     Enum.reduce(by_param, findings, fn {param, group}, acc ->
-      if is_nil(param) or length(group) < 2 do
+      if length(group) < 2 do
         acc
       else
         mins = Enum.filter(group, &(&1.operator == :>=)) |> Enum.map(& &1.value) |> Enum.reject(&is_nil/1)
         maxs = Enum.filter(group, &(&1.operator == :<=)) |> Enum.map(& &1.value) |> Enum.reject(&is_nil/1)
 
-        if length(mins) > 0 and length(maxs) > 0 do
-          if Enum.max(mins) > Enum.min(maxs) do
-            [%{
-              level: :value_suspicious,
-              clause_type: :conflict,
-              parameter_class: param,
-              message: "Conflicting bounds for #{param}: min #{Enum.max(mins)} > max #{Enum.min(maxs)}"
-            } | acc]
-          else
-            acc
-          end
+        if length(mins) > 0 and length(maxs) > 0 and Enum.max(mins) > Enum.min(maxs) do
+          [%{
+            level: :value_suspicious,
+            clause_id: nil,
+            clause_type: :conflict,
+            parameter_class: param,
+            message: "Conflicting bounds for #{param}: min #{Enum.max(mins)} > max #{Enum.min(maxs)}"
+          } | acc]
         else
           acc
         end
@@ -269,15 +251,26 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
     end)
   end
 
-  # Does any extracted clause satisfy this template requirement?
-  defp clause_matches_requirement?(clauses, requirement) do
-    param_members = TemplateRegistry.parameter_class_members(requirement.parameter_class)
+  defp resolve_family_id(%Contract{} = contract) do
+    cond do
+      is_binary(Map.get(contract, :family_id)) ->
+        contract.family_id
 
-    Enum.any?(clauses, fn clause ->
-      clause.type == requirement.clause_type and
-        (is_nil(requirement.parameter_class) or
-         clause.parameter in param_members or
-         clause.parameter == requirement.parameter_class)
-    end)
+      not is_nil(contract.template_type) ->
+        case {contract.template_type, contract.incoterm} do
+          {:purchase, ic} when ic in [:fob, :cfr] -> "VESSEL_SPOT_PURCHASE"
+          {:spot_purchase, _} -> "VESSEL_SPOT_PURCHASE"
+          {:sale, ic} when ic in [:fob, :cfr, :cif] -> "VESSEL_SPOT_SALE"
+          {:spot_sale, ic} when ic in [:fob, :cfr, :cif] -> "VESSEL_SPOT_SALE"
+          {:sale, ic} when ic in [:dap, :ddp] -> "VESSEL_SPOT_DAP"
+          {:spot_sale, ic} when ic in [:dap, :ddp] -> "VESSEL_SPOT_DAP"
+          {:sale, :cpt} -> "DOMESTIC_CPT_TRUCKS"
+          {:spot_sale, :cpt} -> "DOMESTIC_CPT_TRUCKS"
+          _ -> "VESSEL_SPOT_PURCHASE"
+        end
+
+      true ->
+        nil
+    end
   end
 end

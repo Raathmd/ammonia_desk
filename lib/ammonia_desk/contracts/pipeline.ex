@@ -175,8 +175,8 @@ defmodule AmmoniaDesk.Contracts.Pipeline do
   All local, no external calls.
   """
   def extract(file_path, counterparty, counterparty_type, product_group, opts \\ []) do
-    with {:read, {:ok, text}} <- {:read, DocumentReader.read(file_path)},
-         {:parse, {clauses, warnings}} <- {:parse, Parser.parse(text)} do
+    with {:read, {:ok, text}} <- {:read, DocumentReader.read(file_path)} do
+      {clauses, warnings, detected_family} = Parser.parse(text)
 
       if length(warnings) > 0 do
         Logger.warning(
@@ -185,13 +185,24 @@ defmodule AmmoniaDesk.Contracts.Pipeline do
         )
       end
 
+      # Auto-detect family if not specified in opts
+      {family_direction, family_incoterm, family_term_type} =
+        case detected_family do
+          {:ok, _family_id, family} ->
+            {family.direction,
+             List.first(family.default_incoterms),
+             family.term_type}
+          _ ->
+            {nil, nil, nil}
+        end
+
       contract = %Contract{
         counterparty: counterparty,
         counterparty_type: counterparty_type,
         product_group: product_group,
-        template_type: Keyword.get(opts, :template_type),
-        incoterm: Keyword.get(opts, :incoterm),
-        term_type: Keyword.get(opts, :term_type),
+        template_type: Keyword.get(opts, :template_type) || family_direction,
+        incoterm: Keyword.get(opts, :incoterm) || family_incoterm,
+        term_type: Keyword.get(opts, :term_type) || family_term_type,
         company: Keyword.get(opts, :company),
         source_file: Path.basename(file_path),
         source_format: DocumentReader.detect_format(file_path),
@@ -205,9 +216,6 @@ defmodule AmmoniaDesk.Contracts.Pipeline do
     else
       {:read, {:error, reason}} ->
         {:error, {:document_read_failed, reason}}
-
-      {:parse, _} ->
-        {:error, :parse_failed}
     end
   end
 
