@@ -267,16 +267,84 @@ defmodule AmmoniaDesk.Contracts.Parser do
   # ──────────────────────────────────────────────────────────
   # SECTION SPLITTING
   # ──────────────────────────────────────────────────────────
+  #
+  # Real contracts (especially from DOCX/DOCM) have section headings
+  # on separate lines from their body text. For example:
+  #
+  #   "5. PRICE"              ← heading paragraph
+  #   ""                      ← blank line
+  #   "Purchase Price: US $340.00 per metric ton FOB..."  ← body
+  #
+  # The old approach split on double newlines and matched each paragraph
+  # independently. This failed because the heading ("5. PRICE") matched
+  # the PRICE clause but didn't contain the actual price value.
+  #
+  # New approach: After splitting into raw paragraphs, merge section
+  # headings with their following body paragraph(s) into unified sections.
+  # The parser then matches against the full section text, getting both
+  # the heading anchors AND the body content with extractable values.
 
   defp split_into_sections(text) do
-    text
-    |> String.split(~r/\n{2,}|\n(?=\d+[\.\)]\s)|\n(?=[A-Z][a-z]+\s+\d)/)
+    raw_paragraphs =
+      text
+      |> String.split(~r/\n{2,}/)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    raw_paragraphs
+    |> merge_heading_with_body()
     |> Enum.with_index(1)
     |> Enum.map(fn {para, idx} ->
       section_ref = detect_section_ref(para, idx)
-      {section_ref, String.trim(para)}
+      {section_ref, para}
     end)
     |> Enum.reject(fn {_, para} -> String.length(para) < 10 end)
+  end
+
+  # A heading is a short paragraph that starts with a section number
+  # (e.g., "5. PRICE", "12. TAXES, FEES AND DUES") or is mostly uppercase.
+  # When we detect one, we merge it with the next paragraph(s) until we
+  # hit another heading or end of input.
+
+  @heading_pattern ~r/^(?:\d+[\.\)]\s+[A-Z]|(?:Section|Article|Clause)\s+\d)/
+
+  defp merge_heading_with_body([]), do: []
+
+  defp merge_heading_with_body([first | rest]) do
+    if is_section_heading?(first) do
+      # Collect body paragraphs until next heading
+      {body_paras, remaining} = collect_body(rest, [])
+      merged = Enum.join([first | body_paras], "\n")
+      [merged | merge_heading_with_body(remaining)]
+    else
+      [first | merge_heading_with_body(rest)]
+    end
+  end
+
+  defp is_section_heading?(para) do
+    # A heading: starts with "N. SOMETHING" and is relatively short (under 120 chars),
+    # OR starts with Section/Article/Clause + number
+    short_enough = String.length(para) < 120
+    numbered = Regex.match?(@heading_pattern, para)
+
+    # Also catch standalone uppercase labels like "BETWEEN:" or "PRODUCT AND SPECIFICATIONS"
+    mostly_upper =
+      short_enough and
+        String.length(para) > 3 and
+        para == String.upcase(para)
+
+    (numbered and short_enough) or mostly_upper
+  end
+
+  defp collect_body([], acc), do: {Enum.reverse(acc), []}
+
+  defp collect_body([next | rest] = all, acc) do
+    if is_section_heading?(next) do
+      # Next heading starts — stop collecting
+      {Enum.reverse(acc), all}
+    else
+      collect_body(rest, [next | acc])
+    end
   end
 
   defp detect_section_ref(para, fallback_idx) do
