@@ -14,5 +14,6 @@ defmodule AmmoniaDesk.Router do
   scope "/", AmmoniaDesk do
     pipe_through :browser
     live "/", ScenarioLive
+    live "/contracts", ContractsLive
   end
 end

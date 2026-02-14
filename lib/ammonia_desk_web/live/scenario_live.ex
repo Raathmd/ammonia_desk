@@ -270,6 +270,7 @@ defmodule AmmoniaDesk.ScenarioLive do
         <div style="display:flex;align-items:center;gap:12px">
           <div style={"width:8px;height:8px;border-radius:50%;background:#{if @auto_result, do: "#10b981", else: "#64748b"};box-shadow:0 0 8px #{if @auto_result, do: "#10b981", else: "transparent"}"}></div>
           <span style="font-size:14px;font-weight:700;color:#e2e8f0;letter-spacing:1px">AMMONIA BARGE SCENARIO DESK</span>
+          <a href="/contracts" style="color:#a78bfa;text-decoration:none;font-size:11px;font-weight:600;padding:4px 10px;border:1px solid #1e293b;border-radius:4px">CONTRACTS</a>
         </div>
         <div style="display:flex;align-items:center;gap:16px;font-size:12px">
           <%= if @auto_result do %>
