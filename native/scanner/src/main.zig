@@ -1,22 +1,26 @@
 // Contract Scanner — Zig native binary called from Elixir via Port.
 //
+// This is a utility. The Elixir app initiates all scans and decides
+// what to do with the results.
+//
 // Responsibilities:
-//   1. Scan SharePoint/OneDrive for contract files via Microsoft Graph API
-//   2. Get file metadata + hashes from Graph without downloading
-//   3. Download changed files, compute SHA-256 on raw bytes
-//   4. Return results as JSON to Elixir over stdout
+//   1. List contract files in a SharePoint folder (metadata + hashes)
+//   2. Compare app-provided hashes against current Graph API hashes
+//      (the app sends stored hashes, Zig hits Graph API and returns the diff)
+//   3. Download a specific file and compute SHA-256 on raw bytes
+//   4. Hash a local file (testing / UNC fallback)
+//
+// The app decides: when to scan, what hashes to compare, what to ingest.
+// This binary only does I/O and hashing.
 //
 // Protocol: JSON lines over stdin/stdout.
-//   Elixir sends a JSON command per line on stdin.
-//   Scanner writes a JSON response per line on stdout.
-//   stderr is used for logging (Elixir can capture or ignore).
 //
 // Commands:
-//   scan           — list all contract files in a SharePoint folder
-//   check_hashes   — compare stored hashes against current Graph API hashes
-//   fetch          — download a file and return content + SHA-256 hash
-//   hash_local     — compute SHA-256 of a local file (testing/fallback)
-//   ping           — health check, returns {"status": "ok"}
+//   ping        — health check
+//   scan        — list files + hashes from a SharePoint folder
+//   diff_hashes — app sends stored hashes, scanner returns new/changed/unchanged
+//   fetch       — download one file, return content + SHA-256
+//   hash_local  — SHA-256 of a local file
 
 const std = @import("std");
 const crypto = std.crypto;
@@ -27,10 +31,6 @@ const fs = std.fs;
 const http = std.http;
 const Uri = std.Uri;
 
-// ─────────────────────────────────────────────────────────────
-// Entry point — read JSON commands from stdin, write responses to stdout
-// ─────────────────────────────────────────────────────────────
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -40,16 +40,15 @@ pub fn main() !void {
     const stdout = io.getStdOut().writer();
     const stderr = io.getStdErr().writer();
 
-    try stderr.print("contract_scanner: started, awaiting commands\n", .{});
+    try stderr.print("contract_scanner: started\n", .{});
 
-    // Read lines from stdin until EOF
     while (true) {
         const line = stdin.readUntilDelimiterOrEofAlloc(allocator, '\n', 1024 * 1024) catch |err| {
             try writeError(stdout, allocator, "read_error", @errorName(err));
             continue;
         };
 
-        if (line == null) break; // EOF — Elixir closed the port
+        if (line == null) break;
         defer allocator.free(line.?);
 
         const trimmed = mem.trim(u8, line.?, &[_]u8{ ' ', '\t', '\r', '\n' });
@@ -59,13 +58,7 @@ pub fn main() !void {
             try writeError(stdout, allocator, "command_error", @errorName(err));
         };
     }
-
-    try stderr.print("contract_scanner: stdin closed, exiting\n", .{});
 }
-
-// ─────────────────────────────────────────────────────────────
-// Command dispatch
-// ─────────────────────────────────────────────────────────────
 
 fn handleCommand(
     allocator: mem.Allocator,
@@ -80,12 +73,10 @@ fn handleCommand(
     defer parsed.deinit();
 
     const root = parsed.value;
-
     const cmd_val = root.object.get("cmd") orelse {
         try writeError(stdout, allocator, "missing_field", "cmd is required");
         return;
     };
-
     const cmd = switch (cmd_val) {
         .string => |s| s,
         else => {
@@ -97,11 +88,11 @@ fn handleCommand(
     try stderr.print("contract_scanner: cmd={s}\n", .{cmd});
 
     if (mem.eql(u8, cmd, "ping")) {
-        try writePing(stdout, allocator);
+        try cmdPing(stdout, allocator);
     } else if (mem.eql(u8, cmd, "scan")) {
         try cmdScan(allocator, root, stdout, stderr);
-    } else if (mem.eql(u8, cmd, "check_hashes")) {
-        try cmdCheckHashes(allocator, root, stdout, stderr);
+    } else if (mem.eql(u8, cmd, "diff_hashes")) {
+        try cmdDiffHashes(allocator, root, stdout, stderr);
     } else if (mem.eql(u8, cmd, "fetch")) {
         try cmdFetch(allocator, root, stdout, stderr);
     } else if (mem.eql(u8, cmd, "hash_local")) {
@@ -112,10 +103,10 @@ fn handleCommand(
 }
 
 // ─────────────────────────────────────────────────────────────
-// CMD: ping — health check
+// CMD: ping
 // ─────────────────────────────────────────────────────────────
 
-fn writePing(stdout: anytype, allocator: mem.Allocator) !void {
+fn cmdPing(stdout: anytype, allocator: mem.Allocator) !void {
     var obj = json.ObjectMap.init(allocator);
     defer obj.deinit();
     try obj.put("status", json.Value{ .string = "ok" });
@@ -125,16 +116,20 @@ fn writePing(stdout: anytype, allocator: mem.Allocator) !void {
 }
 
 // ─────────────────────────────────────────────────────────────
-// CMD: scan — list contract files in a SharePoint folder via Graph API
+// CMD: scan — list files + hashes from a SharePoint folder
+//
+// Returns the current state of the folder. The app compares
+// these results against its database to decide what to ingest.
 //
 // Input:
-//   {"cmd": "scan", "token": "Bearer ...", "site_id": "...",
+//   {"cmd": "scan", "token": "Bearer ...",
 //    "drive_id": "...", "folder_path": "/Contracts/Ammonia"}
 //
 // Output:
-//   {"status": "ok", "files": [
-//     {"item_id": "...", "name": "Koch_FOB_2026.docx",
-//      "size": 145320, "sha256": "abc123...", "quick_xor": "...",
+//   {"status": "ok", "file_count": 12, "files": [
+//     {"item_id": "abc123", "drive_id": "drv456",
+//      "name": "Koch_FOB_2026.docx", "size": 145320,
+//      "sha256": "a1b2c3...", "quick_xor_hash": "...",
 //      "modified_at": "2026-01-15T14:30:00Z",
 //      "web_url": "https://..."}
 //   ]}
@@ -156,8 +151,6 @@ fn cmdScan(
     };
     const folder_path = getStr(root, "folder_path") orelse "/";
 
-    // Build Graph API URL:
-    // GET /drives/{drive-id}/root:{folder-path}:/children?$select=id,name,file,size,lastModifiedDateTime,webUrl
     const url = try std.fmt.allocPrint(
         allocator,
         "https://graph.microsoft.com/v1.0/drives/{s}/root:{s}:/children?$select=id,name,file,size,lastModifiedDateTime,webUrl&$top=200",
@@ -173,19 +166,16 @@ fn cmdScan(
     };
     defer allocator.free(response);
 
-    // Parse Graph API response
     const graph_parsed = json.parseFromSlice(json.Value, allocator, response, .{}) catch {
         try writeError(stdout, allocator, "graph_parse_error", "invalid Graph API response");
         return;
     };
     defer graph_parsed.deinit();
 
-    const graph_root = graph_parsed.value;
-    const items_val = graph_root.object.get("value") orelse {
+    const items_val = graph_parsed.value.object.get("value") orelse {
         try writeError(stdout, allocator, "graph_format_error", "no 'value' array in response");
         return;
     };
-
     const items = switch (items_val) {
         .array => |a| a,
         else => {
@@ -194,8 +184,6 @@ fn cmdScan(
         },
     };
 
-    // Build files array — only include actual files (have "file" property),
-    // filter to supported extensions
     var files = json.Array.init(allocator);
     defer files.deinit();
 
@@ -205,93 +193,70 @@ fn cmdScan(
             else => continue,
         };
 
-        // Skip folders (no "file" property)
         const file_prop = item_obj.get("file") orelse continue;
         const name = getStrFromObj(item_obj, "name") orelse continue;
-
-        // Filter to contract file extensions
         if (!isSupportedExt(name)) continue;
 
-        var file_entry = json.ObjectMap.init(allocator);
+        var entry = json.ObjectMap.init(allocator);
 
-        // Core fields
         if (getStrFromObj(item_obj, "id")) |id| {
-            try file_entry.put("item_id", json.Value{ .string = id });
+            try entry.put("item_id", json.Value{ .string = id });
         }
-        try file_entry.put("name", json.Value{ .string = name });
-        try file_entry.put("drive_id", json.Value{ .string = drive_id });
+        try entry.put("name", json.Value{ .string = name });
+        try entry.put("drive_id", json.Value{ .string = drive_id });
 
-        // Size
-        if (item_obj.get("size")) |size_val| {
-            try file_entry.put("size", size_val);
-        }
+        if (item_obj.get("size")) |sz| try entry.put("size", sz);
+        if (getStrFromObj(item_obj, "lastModifiedDateTime")) |m| try entry.put("modified_at", json.Value{ .string = m });
+        if (getStrFromObj(item_obj, "webUrl")) |w| try entry.put("web_url", json.Value{ .string = w });
 
-        // Modified timestamp
-        if (getStrFromObj(item_obj, "lastModifiedDateTime")) |mod| {
-            try file_entry.put("modified_at", json.Value{ .string = mod });
-        }
-
-        // Web URL
-        if (getStrFromObj(item_obj, "webUrl")) |web| {
-            try file_entry.put("web_url", json.Value{ .string = web });
+        if (extractFileHashes(file_prop)) |h| {
+            if (h.sha256) |sha| try entry.put("sha256", json.Value{ .string = sha });
+            if (h.quick_xor) |qx| try entry.put("quick_xor_hash", json.Value{ .string = qx });
         }
 
-        // Hashes from file.hashes
-        const file_obj = switch (file_prop) {
-            .object => |o| o,
-            else => null,
-        };
-
-        if (file_obj) |fo| {
-            if (fo.get("hashes")) |hashes_val| {
-                const hashes_obj = switch (hashes_val) {
-                    .object => |o| o,
-                    else => null,
-                };
-
-                if (hashes_obj) |ho| {
-                    if (getStrFromObj(ho, "sha256Hash")) |sha| {
-                        try file_entry.put("sha256", json.Value{ .string = sha });
-                    }
-                    if (getStrFromObj(ho, "quickXorHash")) |qxor| {
-                        try file_entry.put("quick_xor_hash", json.Value{ .string = qxor });
-                    }
-                }
-            }
-        }
-
-        try files.append(json.Value{ .object = file_entry });
+        try files.append(json.Value{ .object = entry });
     }
 
-    // Build response
     var result = json.ObjectMap.init(allocator);
     defer result.deinit();
     try result.put("status", json.Value{ .string = "ok" });
     try result.put("file_count", json.Value{ .integer = @intCast(files.items.len) });
     try result.put("files", json.Value{ .array = files });
-
     try writeJsonLine(stdout, allocator, json.Value{ .object = result });
 }
 
 // ─────────────────────────────────────────────────────────────
-// CMD: check_hashes — compare stored hashes against Graph API
+// CMD: diff_hashes — compare app-provided hashes against Graph API
+//
+// The app sends its known hashes. Zig hits Graph API for each file's
+// current hash and returns the diff. No file downloads — metadata only.
+//
+// This keeps the round-trip efficient: one command, batch comparison,
+// one response. The app doesn't need N individual Graph API calls.
 //
 // Input:
-//   {"cmd": "check_hashes", "token": "Bearer ...",
-//    "files": [
-//      {"drive_id": "...", "item_id": "...", "stored_hash": "abc123...",
-//       "contract_id": "elixir-uuid"}
+//   {"cmd": "diff_hashes", "token": "Bearer ...",
+//    "known": [
+//      {"id": "contract-uuid", "drive_id": "...", "item_id": "...",
+//       "hash": "abc123..."}
 //    ]}
 //
 // Output:
 //   {"status": "ok",
-//    "changed": [{"contract_id": "...", "item_id": "...",
-//                  "stored_hash": "old", "current_hash": "new", "size": 145320}],
-//    "unchanged": [{"contract_id": "...", "item_id": "..."}],
-//    "errors": [{"contract_id": "...", "error": "not_found"}]}
+//    "new": [],           (files on Graph not in known list — from scan)
+//    "changed": [         (hash differs)
+//      {"id": "contract-uuid", "item_id": "...", "drive_id": "...",
+//       "old_hash": "abc123", "new_hash": "def456", "size": 145320}
+//    ],
+//    "unchanged": [       (hash matches)
+//      {"id": "contract-uuid", "item_id": "..."}
+//    ],
+//    "missing": [         (item_id no longer on Graph)
+//      {"id": "contract-uuid", "item_id": "...", "error": "not_found"}
+//    ]}
 // ─────────────────────────────────────────────────────────────
 
-fn cmdCheckHashes(
+fn cmdDiffHashes(
     allocator: mem.Allocator,
     root: json.Value,
     stdout: anytype,
@@ -302,15 +267,14 @@ fn cmdCheckHashes(
         return;
     };
 
-    const files_val = root.object.get("files") orelse {
-        try writeError(stdout, allocator, "missing_field", "files array is required");
+    const known_val = root.object.get("known") orelse {
+        try writeError(stdout, allocator, "missing_field", "known array is required");
         return;
     };
-
-    const files = switch (files_val) {
+    const known = switch (known_val) {
         .array => |a| a,
         else => {
-            try writeError(stdout, allocator, "invalid_field", "files must be an array");
+            try writeError(stdout, allocator, "invalid_field", "known must be an array");
             return;
         },
     };
@@ -319,21 +283,21 @@ fn cmdCheckHashes(
     defer changed.deinit();
     var unchanged = json.Array.init(allocator);
     defer unchanged.deinit();
-    var errors = json.Array.init(allocator);
-    defer errors.deinit();
+    var missing = json.Array.init(allocator);
+    defer missing.deinit();
 
-    for (files.items) |file_val| {
-        const file_obj = switch (file_val) {
+    for (known.items) |entry_val| {
+        const entry_obj = switch (entry_val) {
             .object => |o| o,
             else => continue,
         };
 
-        const contract_id = getStrFromObj(file_obj, "contract_id") orelse continue;
-        const drive_id = getStrFromObj(file_obj, "drive_id") orelse continue;
-        const item_id = getStrFromObj(file_obj, "item_id") orelse continue;
-        const stored_hash = getStrFromObj(file_obj, "stored_hash") orelse continue;
+        const id = getStrFromObj(entry_obj, "id") orelse continue;
+        const drive_id = getStrFromObj(entry_obj, "drive_id") orelse continue;
+        const item_id = getStrFromObj(entry_obj, "item_id") orelse continue;
+        const old_hash = getStrFromObj(entry_obj, "hash") orelse continue;
 
-        // Get current metadata from Graph API
+        // Get current file metadata from Graph API (no download)
         const url = try std.fmt.allocPrint(
             allocator,
             "https://graph.microsoft.com/v1.0/drives/{s}/items/{s}?$select=file,size",
@@ -342,88 +306,75 @@ fn cmdCheckHashes(
         defer allocator.free(url);
 
         const response = graphGet(allocator, url, token) catch |err| {
-            try stderr.print("contract_scanner: check_hash error for {s}: {s}\n", .{ contract_id, @errorName(err) });
-            var err_entry = json.ObjectMap.init(allocator);
-            try err_entry.put("contract_id", json.Value{ .string = contract_id });
-            try err_entry.put("error", json.Value{ .string = @errorName(err) });
-            try errors.append(json.Value{ .object = err_entry });
+            try stderr.print("contract_scanner: diff error {s}: {s}\n", .{ id, @errorName(err) });
+            var m = json.ObjectMap.init(allocator);
+            try m.put("id", json.Value{ .string = id });
+            try m.put("item_id", json.Value{ .string = item_id });
+            try m.put("error", json.Value{ .string = @errorName(err) });
+            try missing.append(json.Value{ .object = m });
             continue;
         };
         defer allocator.free(response);
 
         const item_parsed = json.parseFromSlice(json.Value, allocator, response, .{}) catch {
-            var err_entry = json.ObjectMap.init(allocator);
-            try err_entry.put("contract_id", json.Value{ .string = contract_id });
-            try err_entry.put("error", json.Value{ .string = "parse_error" });
-            try errors.append(json.Value{ .object = err_entry });
+            var m = json.ObjectMap.init(allocator);
+            try m.put("id", json.Value{ .string = id });
+            try m.put("item_id", json.Value{ .string = item_id });
+            try m.put("error", json.Value{ .string = "parse_error" });
+            try missing.append(json.Value{ .object = m });
             continue;
         };
         defer item_parsed.deinit();
 
-        // Extract current hash
-        const current_hash = extractSha256(item_parsed.value);
-        const current_qxor = extractQuickXor(item_parsed.value);
+        // Extract current hash from Graph metadata
+        const current_hash = extractSha256FromItem(item_parsed.value);
 
-        // Compare — use SHA-256 if available, fall back to quickXorHash
-        const hash_match = if (current_hash) |ch|
-            mem.eql(u8, ch, stored_hash)
-        else if (current_qxor) |_|
-            false // can't compare — different hash types, force re-check
-        else
-            false; // no hash available, assume changed
-
-        if (hash_match) {
-            var entry = json.ObjectMap.init(allocator);
-            try entry.put("contract_id", json.Value{ .string = contract_id });
-            try entry.put("item_id", json.Value{ .string = item_id });
-            try unchanged.append(json.Value{ .object = entry });
+        if (current_hash) |ch| {
+            if (mem.eql(u8, ch, old_hash)) {
+                // Same hash — no change
+                var u = json.ObjectMap.init(allocator);
+                try u.put("id", json.Value{ .string = id });
+                try u.put("item_id", json.Value{ .string = item_id });
+                try unchanged.append(json.Value{ .object = u });
+            } else {
+                // Different hash — document changed
+                var c = json.ObjectMap.init(allocator);
+                try c.put("id", json.Value{ .string = id });
+                try c.put("item_id", json.Value{ .string = item_id });
+                try c.put("drive_id", json.Value{ .string = drive_id });
+                try c.put("old_hash", json.Value{ .string = old_hash });
+                try c.put("new_hash", json.Value{ .string = ch });
+                if (item_parsed.value.object.get("size")) |sz| try c.put("size", sz);
+                try changed.append(json.Value{ .object = c });
+            }
         } else {
-            var entry = json.ObjectMap.init(allocator);
-            try entry.put("contract_id", json.Value{ .string = contract_id });
-            try entry.put("item_id", json.Value{ .string = item_id });
-            try entry.put("drive_id", json.Value{ .string = drive_id });
-            try entry.put("stored_hash", json.Value{ .string = stored_hash });
-            if (current_hash) |ch| {
-                try entry.put("current_hash", json.Value{ .string = ch });
-            }
-            if (current_qxor) |cq| {
-                try entry.put("current_quick_xor", json.Value{ .string = cq });
-            }
-            // Include size for the changed entry
-            if (item_parsed.value.object.get("size")) |sz| {
-                try entry.put("size", sz);
-            }
-            try changed.append(json.Value{ .object = entry });
+            // No SHA-256 available — treat as changed to be safe
+            var c = json.ObjectMap.init(allocator);
+            try c.put("id", json.Value{ .string = id });
+            try c.put("item_id", json.Value{ .string = item_id });
+            try c.put("drive_id", json.Value{ .string = drive_id });
+            try c.put("old_hash", json.Value{ .string = old_hash });
+            try c.put("new_hash", json.Value{ .string = "unavailable" });
+            try changed.append(json.Value{ .object = c });
         }
     }
 
-    // Build response
     var result = json.ObjectMap.init(allocator);
     defer result.deinit();
     try result.put("status", json.Value{ .string = "ok" });
     try result.put("changed_count", json.Value{ .integer = @intCast(changed.items.len) });
     try result.put("unchanged_count", json.Value{ .integer = @intCast(unchanged.items.len) });
-    try result.put("error_count", json.Value{ .integer = @intCast(errors.items.len) });
+    try result.put("missing_count", json.Value{ .integer = @intCast(missing.items.len) });
     try result.put("changed", json.Value{ .array = changed });
     try result.put("unchanged", json.Value{ .array = unchanged });
-    try result.put("errors", json.Value{ .array = errors });
-
+    try result.put("missing", json.Value{ .array = missing });
     try writeJsonLine(stdout, allocator, json.Value{ .object = result });
 }
 
 // ─────────────────────────────────────────────────────────────
-// CMD: fetch — download file content from Graph API + compute SHA-256
+// CMD: fetch — download one file, return content + SHA-256
 //
-// Input:
-//   {"cmd": "fetch", "token": "Bearer ...",
-//    "drive_id": "...", "item_id": "..."}
-//
-// Output:
-//   {"status": "ok", "item_id": "...", "sha256": "hex...",
-//    "size": 145320, "content_base64": "base64..."}
-//
-// The content is base64-encoded so it can travel over JSON.
-// Elixir decodes it and passes the text to Copilot for extraction.
+// The app calls this after determining a file needs ingestion.
 // ─────────────────────────────────────────────────────────────
 
 fn cmdFetch(
@@ -445,8 +396,6 @@ fn cmdFetch(
         return;
     };
 
-    // Download file content
-    // GET /drives/{drive-id}/items/{item-id}/content
     const url = try std.fmt.allocPrint(
         allocator,
         "https://graph.microsoft.com/v1.0/drives/{s}/items/{s}/content",
@@ -462,20 +411,17 @@ fn cmdFetch(
     };
     defer allocator.free(content);
 
-    // Compute SHA-256 on raw bytes
     const hash_hex = computeSha256Hex(allocator, content) catch |err| {
         try writeError(stdout, allocator, "hash_error", @errorName(err));
         return;
     };
     defer allocator.free(hash_hex);
 
-    // Base64-encode content for JSON transport
     const b64_len = std.base64.standard.Encoder.calcSize(content.len);
     const b64_buf = try allocator.alloc(u8, b64_len);
     defer allocator.free(b64_buf);
     _ = std.base64.standard.Encoder.encode(b64_buf, content);
 
-    // Build response
     var result = json.ObjectMap.init(allocator);
     defer result.deinit();
     try result.put("status", json.Value{ .string = "ok" });
@@ -483,15 +429,11 @@ fn cmdFetch(
     try result.put("sha256", json.Value{ .string = hash_hex });
     try result.put("size", json.Value{ .integer = @intCast(content.len) });
     try result.put("content_base64", json.Value{ .string = b64_buf });
-
     try writeJsonLine(stdout, allocator, json.Value{ .object = result });
 }
 
 // ─────────────────────────────────────────────────────────────
-// CMD: hash_local — SHA-256 of a local file (testing / UNC paths)
-//
-// Input:  {"cmd": "hash_local", "path": "/path/to/file.docx"}
-// Output: {"status": "ok", "path": "...", "sha256": "hex...", "size": 12345}
+// CMD: hash_local
 // ─────────────────────────────────────────────────────────────
 
 fn cmdHashLocal(
@@ -510,7 +452,6 @@ fn cmdHashLocal(
     };
     defer file.close();
 
-    // Read file and compute hash
     const content = file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch |err| {
         try writeError(stdout, allocator, "read_error", @errorName(err));
         return;
@@ -529,12 +470,11 @@ fn cmdHashLocal(
     try result.put("path", json.Value{ .string = path });
     try result.put("sha256", json.Value{ .string = hash_hex });
     try result.put("size", json.Value{ .integer = @intCast(content.len) });
-
     try writeJsonLine(stdout, allocator, json.Value{ .object = result });
 }
 
 // ─────────────────────────────────────────────────────────────
-// SHA-256 hashing
+// SHA-256
 // ─────────────────────────────────────────────────────────────
 
 fn computeSha256Hex(allocator: mem.Allocator, data: []const u8) ![]u8 {
@@ -543,7 +483,6 @@ fn computeSha256Hex(allocator: mem.Allocator, data: []const u8) ![]u8 {
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
 
-    // Convert to lowercase hex
     const hex = try allocator.alloc(u8, 64);
     const hex_chars = "0123456789abcdef";
     for (digest, 0..) |byte, i| {
@@ -554,7 +493,7 @@ fn computeSha256Hex(allocator: mem.Allocator, data: []const u8) ![]u8 {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Graph API HTTP client
+// Graph API HTTP
 // ─────────────────────────────────────────────────────────────
 
 fn graphGet(allocator: mem.Allocator, url: []const u8, token: []const u8) ![]u8 {
@@ -580,46 +519,51 @@ fn graphGet(allocator: mem.Allocator, url: []const u8, token: []const u8) ![]u8 
         return error.GraphApiError;
     }
 
-    const body = try req.reader().readAllAlloc(allocator, 50 * 1024 * 1024);
-    return body;
+    return try req.reader().readAllAlloc(allocator, 50 * 1024 * 1024);
 }
 
 // ─────────────────────────────────────────────────────────────
-// Graph API response helpers
+// Helpers
 // ─────────────────────────────────────────────────────────────
 
-fn extractSha256(item: json.Value) ?[]const u8 {
-    const file_obj = switch (item.object.get("file") orelse return null) {
+const FileHashes = struct {
+    sha256: ?[]const u8,
+    quick_xor: ?[]const u8,
+};
+
+fn extractFileHashes(file_prop: json.Value) ?FileHashes {
+    const file_obj = switch (file_prop) {
         .object => |o| o,
         else => return null,
     };
-    const hashes = switch (file_obj.get("hashes") orelse return null) {
+    const hashes_val = file_obj.get("hashes") orelse return null;
+    const hashes_obj = switch (hashes_val) {
         .object => |o| o,
         else => return null,
     };
-    return getStrFromObj(hashes, "sha256Hash");
+    return FileHashes{
+        .sha256 = getStrFromObj(hashes_obj, "sha256Hash"),
+        .quick_xor = getStrFromObj(hashes_obj, "quickXorHash"),
+    };
 }
 
-fn extractQuickXor(item: json.Value) ?[]const u8 {
-    const file_obj = switch (item.object.get("file") orelse return null) {
+fn extractSha256FromItem(item: json.Value) ?[]const u8 {
+    const file_val = item.object.get("file") orelse return null;
+    const file_obj = switch (file_val) {
         .object => |o| o,
         else => return null,
     };
-    const hashes = switch (file_obj.get("hashes") orelse return null) {
+    const hashes_val = file_obj.get("hashes") orelse return null;
+    const hashes_obj = switch (hashes_val) {
         .object => |o| o,
         else => return null,
     };
-    return getStrFromObj(hashes, "quickXorHash");
+    return getStrFromObj(hashes_obj, "sha256Hash");
 }
-
-// ─────────────────────────────────────────────────────────────
-// File extension filter
-// ─────────────────────────────────────────────────────────────
 
 fn isSupportedExt(name: []const u8) bool {
     const supported = [_][]const u8{ ".pdf", ".docx", ".docm", ".txt", ".doc" };
     const lower_ext = blk: {
-        // Find last '.'
         var i: usize = name.len;
         while (i > 0) {
             i -= 1;
@@ -627,24 +571,17 @@ fn isSupportedExt(name: []const u8) bool {
         }
         break :blk "";
     };
-
     for (supported) |ext| {
         if (std.ascii.eqlIgnoreCase(lower_ext, ext)) return true;
     }
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────
-// JSON output helpers
-// ─────────────────────────────────────────────────────────────
-
 fn writeJsonLine(writer: anytype, allocator: mem.Allocator, value: json.Value) !void {
     var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
-
     try json.stringify(value, .{}, output.writer());
     try output.append('\n');
-
     try writer.writeAll(output.items);
 }
 
@@ -656,10 +593,6 @@ fn writeError(writer: anytype, allocator: mem.Allocator, error_type: []const u8,
     try obj.put("detail", json.Value{ .string = detail });
     try writeJsonLine(writer, allocator, json.Value{ .object = obj });
 }
-
-// ─────────────────────────────────────────────────────────────
-// JSON value access helpers
-// ─────────────────────────────────────────────────────────────
 
 fn getStr(value: json.Value, key: []const u8) ?[]const u8 {
     const obj = switch (value) {
@@ -685,8 +618,6 @@ test "sha256 hash computation" {
     const allocator = std.testing.allocator;
     const result = try computeSha256Hex(allocator, "hello world");
     defer allocator.free(result);
-
-    // Known SHA-256 of "hello world"
     try std.testing.expectEqualStrings(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
         result,
