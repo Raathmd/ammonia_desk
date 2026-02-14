@@ -107,7 +107,21 @@ defmodule AmmoniaDesk.Scenarios.AutoRunner do
     live_vars = AmmoniaDesk.Data.LiveState.get()
     triggers = detect_triggers(state.last_center, live_vars)
 
-    case AmmoniaDesk.Solver.Port.monte_carlo(live_vars, state.n_scenarios) do
+    # Pipeline: check contracts → ingest changes → monte carlo
+    pipeline_result =
+      AmmoniaDesk.Solver.Pipeline.monte_carlo(live_vars,
+        product_group: :ammonia,
+        n_scenarios: state.n_scenarios,
+        caller_ref: :auto_runner
+      )
+
+    # Unwrap pipeline envelope — the solver result is nested under :result
+    solve_result = case pipeline_result do
+      {:ok, %{result: dist}} -> {:ok, dist}
+      {:error, _} = err -> err
+    end
+
+    case solve_result do
       {:ok, distribution} ->
         result = %{
           distribution: distribution,

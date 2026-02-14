@@ -12,6 +12,7 @@ defmodule AmmoniaDesk.Application do
       AmmoniaDesk.Scenarios.AutoRunner,
       AmmoniaDesk.Contracts.Store,
       AmmoniaDesk.Contracts.CurrencyTracker,
+      AmmoniaDesk.Contracts.NetworkScanner,
       {Task.Supervisor, name: AmmoniaDesk.Contracts.TaskSupervisor},
       AmmoniaDesk.Endpoint
     ]

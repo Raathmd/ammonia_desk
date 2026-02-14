@@ -17,6 +17,7 @@ defmodule AmmoniaDesk.ScenarioLive do
 
   alias AmmoniaDesk.Variables
   alias AmmoniaDesk.Solver.Port, as: Solver
+  alias AmmoniaDesk.Solver.Pipeline
   alias AmmoniaDesk.Data.LiveState
   alias AmmoniaDesk.Scenarios.Store
 
@@ -28,6 +29,7 @@ defmodule AmmoniaDesk.ScenarioLive do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(AmmoniaDesk.PubSub, "live_data")
       Phoenix.PubSub.subscribe(AmmoniaDesk.PubSub, "auto_runner")
+      Phoenix.PubSub.subscribe(AmmoniaDesk.PubSub, "solve_pipeline")
     end
 
     live_vars = LiveState.get()
@@ -51,20 +53,23 @@ defmodule AmmoniaDesk.ScenarioLive do
       |> assign(:agent_history, [])
       |> assign(:explanation, nil)
       |> assign(:explaining, false)
+      |> assign(:pipeline_phase, nil)
+      |> assign(:pipeline_detail, nil)
+      |> assign(:contracts_stale, false)
 
     {:ok, socket}
   end
 
   @impl true
   def handle_event("solve", _params, socket) do
-    socket = assign(socket, :solving, true)
+    socket = assign(socket, solving: true, pipeline_phase: :checking_contracts, pipeline_detail: nil, contracts_stale: false)
     send(self(), :do_solve)
     {:noreply, socket}
   end
 
   @impl true
   def handle_event("monte_carlo", _params, socket) do
-    socket = assign(socket, :solving, true)
+    socket = assign(socket, solving: true, pipeline_phase: :checking_contracts, pipeline_detail: nil, contracts_stale: false)
     send(self(), :do_monte_carlo)
     {:noreply, socket}
   end
@@ -191,40 +196,98 @@ defmodule AmmoniaDesk.ScenarioLive do
 
   @impl true
   def handle_info(:do_solve, socket) do
-    case Solver.solve(socket.assigns.current_vars) do
-      {:ok, result} ->
-        socket = assign(socket, result: result, solving: false, explanation: nil, explaining: true)
-        vars = socket.assigns.current_vars
-        lv_pid = self()
-        spawn(fn ->
-          case AmmoniaDesk.Analyst.explain_solve(vars, result) do
-            {:ok, text} -> send(lv_pid, {:explanation_result, text})
-            _ -> send(lv_pid, {:explanation_result, nil})
-          end
-        end)
-        {:noreply, socket}
-      {:error, _reason} ->
-        {:noreply, assign(socket, solving: false)}
-    end
+    vars = socket.assigns.current_vars
+    # Pipeline: check contracts → ingest changes → solve
+    Pipeline.solve_async(vars, product_group: :ammonia, caller_ref: :trader_solve)
+    {:noreply, socket}
   end
 
   @impl true
   def handle_info(:do_monte_carlo, socket) do
-    case Solver.monte_carlo(socket.assigns.current_vars) do
-      {:ok, dist} ->
-        socket = assign(socket, distribution: dist, solving: false, explanation: nil, explaining: true)
-        vars = socket.assigns.current_vars
-        lv_pid = self()
-        spawn(fn ->
-          case AmmoniaDesk.Analyst.explain_distribution(vars, dist) do
-            {:ok, text} -> send(lv_pid, {:explanation_result, text})
-            _ -> send(lv_pid, {:explanation_result, nil})
-          end
-        end)
-        {:noreply, socket}
-      {:error, _reason} ->
-        {:noreply, assign(socket, solving: false)}
-    end
+    vars = socket.assigns.current_vars
+    # Pipeline: check contracts → ingest changes → monte carlo
+    Pipeline.monte_carlo_async(vars, product_group: :ammonia, caller_ref: :trader_mc)
+    {:noreply, socket}
+  end
+
+  # --- Pipeline phase events ---
+
+  @impl true
+  def handle_info({:pipeline_event, :pipeline_started, %{caller_ref: ref}}, socket) when ref in [:trader_solve, :trader_mc] do
+    {:noreply, assign(socket, pipeline_phase: :checking_contracts)}
+  end
+
+  def handle_info({:pipeline_event, :pipeline_contracts_ok, %{caller_ref: ref}}, socket) when ref in [:trader_solve, :trader_mc] do
+    {:noreply, assign(socket, pipeline_phase: :solving, pipeline_detail: nil)}
+  end
+
+  def handle_info({:pipeline_event, :pipeline_ingesting, %{changed: n, caller_ref: ref}}, socket) when ref in [:trader_solve, :trader_mc] do
+    {:noreply, assign(socket, pipeline_phase: :ingesting, pipeline_detail: "#{n} contract#{if n != 1, do: "s", else: ""} changed — Copilot ingesting")}
+  end
+
+  def handle_info({:pipeline_event, :pipeline_ingest_done, %{caller_ref: ref}}, socket) when ref in [:trader_solve, :trader_mc] do
+    {:noreply, assign(socket, pipeline_phase: :solving, pipeline_detail: nil)}
+  end
+
+  def handle_info({:pipeline_event, :pipeline_contracts_stale, %{caller_ref: ref}}, socket) when ref in [:trader_solve, :trader_mc] do
+    {:noreply, assign(socket, pipeline_phase: :solving, contracts_stale: true)}
+  end
+
+  def handle_info({:pipeline_event, :pipeline_solving, %{caller_ref: ref}}, socket) when ref in [:trader_solve, :trader_mc] do
+    {:noreply, assign(socket, pipeline_phase: :solving)}
+  end
+
+  def handle_info({:pipeline_event, :pipeline_solve_done, %{mode: :solve, result: result, caller_ref: :trader_solve} = payload}, socket) do
+    contracts_stale = Map.get(payload, :contracts_stale, false) or socket.assigns.contracts_stale
+    socket = assign(socket,
+      result: result,
+      solving: false,
+      pipeline_phase: nil,
+      pipeline_detail: nil,
+      contracts_stale: contracts_stale,
+      explanation: nil,
+      explaining: true
+    )
+    vars = socket.assigns.current_vars
+    lv_pid = self()
+    spawn(fn ->
+      case AmmoniaDesk.Analyst.explain_solve(vars, result) do
+        {:ok, text} -> send(lv_pid, {:explanation_result, text})
+        _ -> send(lv_pid, {:explanation_result, nil})
+      end
+    end)
+    {:noreply, socket}
+  end
+
+  def handle_info({:pipeline_event, :pipeline_solve_done, %{mode: :monte_carlo, result: dist, caller_ref: :trader_mc} = payload}, socket) do
+    contracts_stale = Map.get(payload, :contracts_stale, false) or socket.assigns.contracts_stale
+    socket = assign(socket,
+      distribution: dist,
+      solving: false,
+      pipeline_phase: nil,
+      pipeline_detail: nil,
+      contracts_stale: contracts_stale,
+      explanation: nil,
+      explaining: true
+    )
+    vars = socket.assigns.current_vars
+    lv_pid = self()
+    spawn(fn ->
+      case AmmoniaDesk.Analyst.explain_distribution(vars, dist) do
+        {:ok, text} -> send(lv_pid, {:explanation_result, text})
+        _ -> send(lv_pid, {:explanation_result, nil})
+      end
+    end)
+    {:noreply, socket}
+  end
+
+  def handle_info({:pipeline_event, :pipeline_error, %{caller_ref: ref}}, socket) when ref in [:trader_solve, :trader_mc] do
+    {:noreply, assign(socket, solving: false, pipeline_phase: nil, pipeline_detail: nil)}
+  end
+
+  # Catch-all for pipeline events not relevant to this LV (e.g. AutoRunner's)
+  def handle_info({:pipeline_event, _, _}, socket) do
+    {:noreply, socket}
   end
 
   @impl true
@@ -326,11 +389,11 @@ defmodule AmmoniaDesk.ScenarioLive do
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
               <button phx-click="solve" disabled={@solving}
                 style="padding:10px;border:none;border-radius:6px;font-weight:700;font-size:12px;background:linear-gradient(135deg,#0891b2,#06b6d4);color:#fff;cursor:pointer;letter-spacing:1px">
-                <%= if @solving, do: "⏳ SOLVING...", else: "⚡ SOLVE" %>
+                <%= pipeline_button_text(@solving, @pipeline_phase, "SOLVE") %>
               </button>
               <button phx-click="monte_carlo" disabled={@solving}
                 style="padding:10px;border:none;border-radius:6px;font-weight:700;font-size:12px;background:linear-gradient(135deg,#7c3aed,#8b5cf6);color:#fff;cursor:pointer;letter-spacing:1px">
-                🎲 MONTE CARLO
+                <%= pipeline_button_text(@solving, @pipeline_phase, "MONTE CARLO") %>
               </button>
             </div>
             <button phx-click="reset"
@@ -356,6 +419,22 @@ defmodule AmmoniaDesk.ScenarioLive do
               🤖 Agent
             </button>
           </div>
+
+          <%# Pipeline status banner %>
+          <%= if @pipeline_phase do %>
+            <div style={"background:#{pipeline_bg(@pipeline_phase)};border:1px solid #{pipeline_border(@pipeline_phase)};border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;font-size:12px"}>
+              <div style={"width:8px;height:8px;border-radius:50%;background:#{pipeline_dot(@pipeline_phase)};animation:pulse 1.5s infinite"}></div>
+              <span style="color:#e2e8f0;font-weight:600"><%= pipeline_phase_text(@pipeline_phase) %></span>
+              <%= if @pipeline_detail do %>
+                <span style="color:#94a3b8">— <%= @pipeline_detail %></span>
+              <% end %>
+            </div>
+          <% end %>
+          <%= if @contracts_stale and not @solving do %>
+            <div style="background:#1c1917;border:1px solid #78350f;border-radius:8px;padding:8px 14px;margin-bottom:12px;font-size:11px;color:#fbbf24">
+              ⚠ Contract data may be stale — scanner was unavailable during this solve
+            </div>
+          <% end %>
 
           <%# === TRADER TAB === %>
           <%= if @active_tab == :trader do %>
@@ -714,4 +793,32 @@ defmodule AmmoniaDesk.ScenarioLive do
     end
   end
   defp parse_value(_key, value), do: value
+
+  # --- Pipeline UI helpers ---
+
+  defp pipeline_button_text(false, _, label), do: "⚡ #{label}"
+  defp pipeline_button_text(true, :checking_contracts, _), do: "📋 CHECKING CONTRACTS..."
+  defp pipeline_button_text(true, :ingesting, _), do: "🔄 INGESTING CHANGES..."
+  defp pipeline_button_text(true, :solving, _), do: "⏳ SOLVING..."
+  defp pipeline_button_text(true, _, _), do: "⏳ WORKING..."
+
+  defp pipeline_phase_text(:checking_contracts), do: "Checking contract hashes"
+  defp pipeline_phase_text(:ingesting), do: "Waiting for Copilot to ingest changes"
+  defp pipeline_phase_text(:solving), do: "Running solver"
+  defp pipeline_phase_text(_), do: "Working"
+
+  defp pipeline_bg(:checking_contracts), do: "#0c1629"
+  defp pipeline_bg(:ingesting), do: "#1a1400"
+  defp pipeline_bg(:solving), do: "#0c1629"
+  defp pipeline_bg(_), do: "#0c1629"
+
+  defp pipeline_border(:checking_contracts), do: "#1e3a5f"
+  defp pipeline_border(:ingesting), do: "#78350f"
+  defp pipeline_border(:solving), do: "#1e3a5f"
+  defp pipeline_border(_), do: "#1e293b"
+
+  defp pipeline_dot(:checking_contracts), do: "#38bdf8"
+  defp pipeline_dot(:ingesting), do: "#f59e0b"
+  defp pipeline_dot(:solving), do: "#10b981"
+  defp pipeline_dot(_), do: "#64748b"
 end
