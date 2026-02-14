@@ -64,6 +64,9 @@ defmodule AmmoniaDesk.Scenarios.Store do
       link_to_audit(audit_id, id)
     end
 
+    # Persist to Postgres (async)
+    AmmoniaDesk.DB.Writer.persist_scenario(scenario)
+
     {:reply, {:ok, scenario}, %{state | counter: id}}
   end
 

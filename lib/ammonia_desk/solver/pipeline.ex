@@ -361,6 +361,7 @@ defmodule AmmoniaDesk.Solver.Pipeline do
   # ──────────────────────────────────────────────────────────
 
   defp write_audit(audit) do
+    # ETS (fast, in-process — powers real-time queries and DAG visualization)
     case SolveAuditStore.record(audit) do
       {:ok, _} ->
         Logger.debug("Audit #{audit.id} recorded (#{audit.mode}, #{length(audit.contracts_used || [])} contracts)")
@@ -368,6 +369,9 @@ defmodule AmmoniaDesk.Solver.Pipeline do
       error ->
         Logger.warning("Failed to write audit #{audit.id}: #{inspect(error)}")
     end
+
+    # Postgres (durable, multi-node — powers audit trail and management reporting)
+    AmmoniaDesk.DB.Writer.persist_solve_audit(audit)
   end
 
   defp extract_result_status(result, :solve) do

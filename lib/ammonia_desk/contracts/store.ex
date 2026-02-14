@@ -135,6 +135,9 @@ defmodule AmmoniaDesk.Contracts.Store do
       "(#{length(contract.clauses || [])} clauses, id=#{contract.id})"
     )
 
+    # Persist to Postgres (async — never blocks)
+    AmmoniaDesk.DB.Writer.persist_contract(contract)
+
     {:reply, {:ok, contract}, state}
   end
 
@@ -240,6 +243,9 @@ defmodule AmmoniaDesk.Contracts.Store do
                 "#{updated.product_group} v#{updated.version}"
               )
             end
+
+            # Persist status change to Postgres
+            AmmoniaDesk.DB.Writer.persist_contract(updated)
 
             {:reply, {:ok, updated}, state}
 
