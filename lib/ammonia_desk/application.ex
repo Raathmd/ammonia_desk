@@ -8,6 +8,7 @@ defmodule AmmoniaDesk.Application do
       AmmoniaDesk.Data.LiveState,
       AmmoniaDesk.Data.Poller,
       AmmoniaDesk.Solver.Port,
+      AmmoniaDesk.Solver.SolveAuditStore,
       AmmoniaDesk.Scenarios.Store,
       AmmoniaDesk.Scenarios.AutoRunner,
       AmmoniaDesk.Contracts.Store,
