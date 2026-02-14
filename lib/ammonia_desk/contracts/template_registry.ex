@@ -419,30 +419,87 @@ defmodule AmmoniaDesk.Contracts.TemplateRegistry do
                         :risk_allocation, :risk_costs, :legal, :legal_long_term]
 
   # ──────────────────────────────────────────────────────────
+  # DYNAMIC CLAUSE/FAMILY REGISTRATION
+  # ──────────────────────────────────────────────────────────
+  #
+  # The 28 canonical clauses and 7 families are compile-time defaults.
+  # Copilot (or any external source) can register additional clause
+  # types and families at runtime via register_clause/2 and
+  # register_family/2. Dynamic additions are stored in :persistent_term
+  # and merged with the compiled defaults on lookup.
+  #
+  # This means the app does NOT need to know all clause types up front.
+  # Copilot can discover new clause types in real contracts and register
+  # them dynamically.
+
+  @dynamic_clauses_key {__MODULE__, :dynamic_clauses}
+  @dynamic_families_key {__MODULE__, :dynamic_families}
+
+  @doc """
+  Register a new clause type at runtime. Called by CopilotIngestion
+  when Copilot discovers clause types not in the canonical inventory.
+
+  `clause_id` — unique string ID (e.g., "SANCTIONS_COMPLIANCE")
+  `definition` — map with :category, :anchors, :extract_fields, :lp_mapping, :level_default
+  """
+  def register_clause(clause_id, definition) when is_binary(clause_id) and is_map(definition) do
+    current = dynamic_clauses()
+    updated = Map.put(current, clause_id, definition)
+    :persistent_term.put(@dynamic_clauses_key, updated)
+    :ok
+  end
+
+  @doc """
+  Register a new family signature at runtime.
+  """
+  def register_family(family_id, definition) when is_binary(family_id) and is_map(definition) do
+    current = dynamic_families()
+    updated = Map.put(current, family_id, definition)
+    :persistent_term.put(@dynamic_families_key, updated)
+    :ok
+  end
+
+  defp dynamic_clauses do
+    try do
+      :persistent_term.get(@dynamic_clauses_key)
+    rescue
+      ArgumentError -> %{}
+    end
+  end
+
+  defp dynamic_families do
+    try do
+      :persistent_term.get(@dynamic_families_key)
+    rescue
+      ArgumentError -> %{}
+    end
+  end
+
+  # ──────────────────────────────────────────────────────────
   # PUBLIC API
   # ──────────────────────────────────────────────────────────
 
-  @doc "All 28 canonical clause definitions"
-  def canonical_clauses, do: @canonical_clauses
+  @doc "All clause definitions (compiled + dynamic)"
+  def canonical_clauses, do: Map.merge(@canonical_clauses, dynamic_clauses())
 
-  @doc "Get a canonical clause definition by ID"
+  @doc "Get a clause definition by ID (checks compiled then dynamic)"
   def get_clause(clause_id) when is_binary(clause_id) do
-    Map.get(@canonical_clauses, clause_id)
+    Map.get(@canonical_clauses, clause_id) || Map.get(dynamic_clauses(), clause_id)
   end
 
-  @doc "All 7 family signature definitions"
-  def family_signatures, do: @family_signatures
+  @doc "All family signature definitions (compiled + dynamic)"
+  def family_signatures, do: Map.merge(@family_signatures, dynamic_families())
 
-  @doc "Get a family signature by ID"
+  @doc "Get a family signature by ID (checks compiled then dynamic)"
   def get_family(family_id) when is_binary(family_id) do
-    Map.get(@family_signatures, family_id)
+    Map.get(@family_signatures, family_id) || Map.get(dynamic_families(), family_id)
   end
 
-  @doc "All family IDs"
-  def family_ids, do: Map.keys(@family_signatures)
+  @doc "All family IDs (compiled + dynamic)"
+  def family_ids, do: Map.keys(family_signatures())
 
-  @doc "All canonical clause IDs"
-  def clause_ids, do: Map.keys(@canonical_clauses)
+  @doc "All clause IDs (compiled + dynamic)"
+  def clause_ids, do: Map.keys(canonical_clauses())
 
   @doc "All known Incoterms"
   def incoterms, do: @incoterms
@@ -462,9 +519,10 @@ defmodule AmmoniaDesk.Contracts.TemplateRegistry do
   """
   def detect_family(text) when is_binary(text) do
     upper = String.upcase(text)
+    all_families = family_signatures()
 
     scored =
-      @family_signatures
+      all_families
       |> Enum.map(fn {family_id, family} ->
         score =
           Enum.count(family.detect_anchors, fn anchor ->
@@ -489,13 +547,13 @@ defmodule AmmoniaDesk.Contracts.TemplateRegistry do
     %{clause_id: "PRICE", level: :required, category: :commercial, ...}
   """
   def family_requirements(family_id) when is_binary(family_id) do
-    case Map.get(@family_signatures, family_id) do
+    case get_family(family_id) do
       nil ->
         []
 
       family ->
         Enum.map(family.expected_clause_ids, fn clause_id ->
-          clause_def = Map.get(@canonical_clauses, clause_id, %{})
+          clause_def = get_clause(clause_id) || %{}
           category = Map.get(clause_def, :category, :unknown)
 
           level =
@@ -598,7 +656,7 @@ defmodule AmmoniaDesk.Contracts.TemplateRegistry do
   Maps family_id or old contract_type+incoterm to a template struct.
   """
   def get_template(family_id) when is_binary(family_id) do
-    case Map.get(@family_signatures, family_id) do
+    case get_family(family_id) do
       nil ->
         {:error, :unknown_template}
 
@@ -633,7 +691,7 @@ defmodule AmmoniaDesk.Contracts.TemplateRegistry do
 
   @doc "List all templates as summary maps (for UI display)."
   def list_templates do
-    Enum.map(@family_signatures, fn {family_id, family} ->
+    Enum.map(family_signatures(), fn {family_id, family} ->
       reqs = family_requirements(family_id)
       required = Enum.count(reqs, &(&1.level == :required))
       expected = Enum.count(reqs, &(&1.level == :expected))

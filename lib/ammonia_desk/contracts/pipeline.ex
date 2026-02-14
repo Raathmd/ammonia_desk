@@ -31,6 +31,7 @@ defmodule AmmoniaDesk.Contracts.Pipeline do
 
   alias AmmoniaDesk.Contracts.{
     Contract,
+    CopilotIngestion,
     DocumentReader,
     Parser,
     Store,
@@ -90,10 +91,108 @@ defmodule AmmoniaDesk.Contracts.Pipeline do
     )
   end
 
+  # ──────────────────────────────────────────────────────────
+  # COPILOT EXTRACTION PATH (primary)
+  # ──────────────────────────────────────────────────────────
+
+  @doc """
+  Ingest a contract using Copilot's pre-extracted clause data.
+  This is the primary ingestion path — Copilot is the extraction service,
+  the app is the system of record.
+
+  Runs: Copilot ingest → template validate → parser cross-check → SAP validate.
+  """
+  def ingest_copilot_async(file_path, extraction, opts \\ []) do
+    Task.Supervisor.async_nolink(
+      AmmoniaDesk.Contracts.TaskSupervisor,
+      fn ->
+        broadcast(:copilot_chain_started, %{
+          file: if(file_path, do: Path.basename(file_path), else: "from_copilot"),
+          counterparty: extraction["counterparty"]
+        })
+
+        case CopilotIngestion.ingest(file_path, extraction, opts) do
+          {:ok, contract} ->
+            # Template validate
+            contract = run_template_validation(contract)
+            CurrencyTracker.stamp(contract.id, :template_validated_at)
+
+            # SAP validate if available
+            if contract.sap_contract_id do
+              case SapValidator.validate(contract.id) do
+                {:ok, _updated} ->
+                  CurrencyTracker.stamp(contract.id, :sap_validated_at)
+                _ -> :ok
+              end
+            end
+
+            gate1 = StrictGate.gate_extraction(contract)
+            broadcast(:copilot_chain_complete, %{
+              contract_id: contract.id,
+              counterparty: contract.counterparty,
+              clause_count: length(contract.clauses || []),
+              gate1: elem(gate1, 0)
+            })
+
+            {:ok, contract}
+
+          {:error, reason} ->
+            broadcast(:copilot_chain_failed, %{
+              file: if(file_path, do: Path.basename(file_path), else: "from_copilot"),
+              reason: inspect(reason)
+            })
+            {:error, reason}
+        end
+      end
+    )
+  end
+
+  @doc """
+  Batch ingest from Copilot — processes multiple contracts in parallel.
+  `batch` is a list of {file_path, extraction_map} tuples.
+  """
+  def ingest_copilot_batch_async(batch, opts \\ []) do
+    Task.Supervisor.async_nolink(
+      AmmoniaDesk.Contracts.TaskSupervisor,
+      fn ->
+        broadcast(:copilot_batch_started, %{count: length(batch)})
+
+        results =
+          batch
+          |> Task.async_stream(
+            fn {file_path, extraction} ->
+              CopilotIngestion.ingest(file_path, extraction, opts)
+            end,
+            max_concurrency: 4,
+            timeout: 60_000
+          )
+          |> Enum.map(fn
+            {:ok, result} -> result
+            {:exit, reason} -> {:error, {:task_failed, reason}}
+          end)
+
+        succeeded = Enum.count(results, &match?({:ok, _}, &1))
+        failed = Enum.count(results, &(not match?({:ok, _}, &1)))
+
+        broadcast(:copilot_batch_complete, %{
+          total: length(batch),
+          succeeded: succeeded,
+          failed: failed
+        })
+
+        {:ok, %{total: length(batch), succeeded: succeeded, failed: failed}}
+      end
+    )
+  end
+
+  # ──────────────────────────────────────────────────────────
+  # DETERMINISTIC PARSER PATH (verification / fallback)
+  # ──────────────────────────────────────────────────────────
+
   @doc """
   Full extraction chain: read → parse → template validate → LLM verify → SAP validate.
   Runs everything in sequence in a single background task. Stamps CurrencyTracker.
-  This is the preferred method for production ingestion.
+  Use this when Copilot is unavailable, or as a fallback verification path.
   """
   def full_extract_async(file_path, counterparty, counterparty_type, product_group, opts \\ []) do
     Task.Supervisor.async_nolink(
