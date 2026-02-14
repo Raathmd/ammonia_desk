@@ -17,14 +17,20 @@ defmodule AmmoniaDesk.Contracts.Contract do
     :counterparty,       # customer or supplier name (e.g., "Koch Fertilizer")
     :counterparty_type,  # :customer | :supplier
     :product_group,      # :ammonia | :uan | :urea (extensible)
+    :template_type,      # :purchase | :sale | :spot_purchase | :spot_sale
+    :incoterm,           # :fob | :cif | :cfr | :dap | :ddp | :fca | :exw
+    :term_type,          # :spot | :long_term
+    :company,            # :trammo_inc | :trammo_sas | :trammo_dmcc
     :version,            # integer, auto-incremented per counterparty+product_group
     :source_file,        # original filename
-    :source_format,      # :pdf | :docx
+    :source_format,      # :pdf | :docx | :docm
     :scan_date,          # when the document was parsed
     :contract_date,      # effective date from the contract itself
     :expiry_date,        # contract expiration
     :status,             # :draft | :pending_review | :approved | :rejected
     :clauses,            # list of %Clause{}
+    :template_validation, # result from TemplateValidator (completeness check)
+    :llm_validation,     # result from LlmValidator (second-pass verification)
     :sap_contract_id,    # SAP reference number for cross-validation
     :sap_validated,      # boolean — has SAP validation passed
     :sap_discrepancies,  # list of {field, contract_value, sap_value} mismatches
@@ -38,6 +44,10 @@ defmodule AmmoniaDesk.Contracts.Contract do
 
   @type counterparty_type :: :customer | :supplier
   @type product_group :: :ammonia | :uan | :urea
+  @type template_type :: :purchase | :sale | :spot_purchase | :spot_sale
+  @type incoterm :: :fob | :cif | :cfr | :dap | :ddp | :fca | :exw
+  @type term_type :: :spot | :long_term
+  @type company :: :trammo_inc | :trammo_sas | :trammo_dmcc
   @type status :: :draft | :pending_review | :approved | :rejected
 
   @type t :: %__MODULE__{
@@ -45,14 +55,20 @@ defmodule AmmoniaDesk.Contracts.Contract do
     counterparty: String.t(),
     counterparty_type: counterparty_type(),
     product_group: product_group(),
+    template_type: template_type() | nil,
+    incoterm: incoterm() | nil,
+    term_type: term_type() | nil,
+    company: company() | nil,
     version: pos_integer() | nil,
     source_file: String.t() | nil,
-    source_format: :pdf | :docx | nil,
+    source_format: :pdf | :docx | :docm | nil,
     scan_date: DateTime.t() | nil,
     contract_date: Date.t() | nil,
     expiry_date: Date.t() | nil,
     status: status(),
     clauses: [Clause.t()],
+    template_validation: map() | nil,
+    llm_validation: map() | nil,
     sap_contract_id: String.t() | nil,
     sap_validated: boolean(),
     sap_discrepancies: list() | nil,

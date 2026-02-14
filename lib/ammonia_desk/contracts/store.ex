@@ -67,6 +67,16 @@ defmodule AmmoniaDesk.Contracts.Store do
     GenServer.call(__MODULE__, {:update_sap_validation, contract_id, sap_result})
   end
 
+  @doc "Update template validation results on a contract"
+  def update_template_validation(contract_id, validation_result) do
+    GenServer.call(__MODULE__, {:update_template_validation, contract_id, validation_result})
+  end
+
+  @doc "Update LLM validation results on a contract"
+  def update_llm_validation(contract_id, validation_result) do
+    GenServer.call(__MODULE__, {:update_llm_validation, contract_id, validation_result})
+  end
+
   @doc "Get all unique counterparties in a product group"
   def counterparties(product_group) do
     GenServer.call(__MODULE__, {:counterparties, product_group})
@@ -260,6 +270,30 @@ defmodule AmmoniaDesk.Contracts.Store do
           sap_discrepancies: sap_result.discrepancies,
           updated_at: DateTime.utc_now()
         }
+        :ets.insert(state.contracts, {contract_id, updated})
+        {:reply, {:ok, updated}, state}
+      [] ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:update_template_validation, contract_id, result}, _from, state) do
+    case :ets.lookup(state.contracts, contract_id) do
+      [{^contract_id, contract}] ->
+        updated = %{contract | template_validation: result, updated_at: DateTime.utc_now()}
+        :ets.insert(state.contracts, {contract_id, updated})
+        {:reply, {:ok, updated}, state}
+      [] ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:update_llm_validation, contract_id, result}, _from, state) do
+    case :ets.lookup(state.contracts, contract_id) do
+      [{^contract_id, contract}] ->
+        updated = %{contract | llm_validation: result, updated_at: DateTime.utc_now()}
         :ets.insert(state.contracts, {contract_id, updated})
         {:reply, {:ok, updated}, state}
       [] ->
