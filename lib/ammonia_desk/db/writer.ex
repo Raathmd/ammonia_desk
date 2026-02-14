@@ -1,55 +1,70 @@
 defmodule AmmoniaDesk.DB.Writer do
   @moduledoc """
-  Asynchronous writer that persists in-memory data to Postgres.
+  Dual-write persistence: snapshot log (WAL) + Postgres.
 
-  ETS remains the fast path for real-time operations. The DB writer
-  runs in the background, ensuring all data reaches Postgres for
-  durable storage, audit trails, and multi-node visibility.
+  Every mutation follows this order:
 
-  ## What gets persisted
+    1. **Snapshot log** (synchronous fsync) — data is on disk, crash-safe
+    2. **Postgres** (async) — durable, queryable, multi-node visible
 
-    - **Contracts**: Written to DB on ingest and status changes.
-      The DB row is the durable audit record; ETS is the hot cache.
+  If Postgres fails, the snapshot log has the data. Run
+  `SnapshotRestore.fill_gaps/0` to replay missing entries.
 
-    - **Solve audits**: Written to DB after every pipeline execution.
-      Includes the join table linking to contract versions used.
+  If the snapshot log fails (disk full, etc.), we still attempt
+  Postgres and log a warning — but this should never happen in
+  normal operation.
 
-    - **Scenarios**: Written to DB when a trader saves a scenario.
+  ## Recovery scenarios
 
-  ## Usage
-
-  Called from the existing ETS-based stores:
-
-      DB.Writer.persist_contract(contract)
-      DB.Writer.persist_solve_audit(audit, contract_ids)
-      DB.Writer.persist_scenario(scenario)
-
-  All writes are async (cast) — the caller never blocks on DB I/O.
+    - **Postgres corrupted**: `SnapshotRestore.restore_postgres/1`
+    - **Node crashed mid-write**: `SnapshotRestore.fill_gaps/0`
+    - **Point-in-time restore**: `SnapshotRestore.restore_postgres(up_to: ts)`
+    - **Full disaster**: `SnapshotRestore.restore_ets/1` + `restore_postgres/1`
   """
 
   alias AmmoniaDesk.Repo
-  alias AmmoniaDesk.DB.{ContractRecord, SolveAuditRecord, SolveAuditContract, ScenarioRecord}
+  alias AmmoniaDesk.DB.{ContractRecord, SolveAuditRecord, SolveAuditContract, ScenarioRecord, SnapshotLog}
 
   require Logger
 
-  @doc "Persist a contract to Postgres (upsert by ID)."
+  @doc "Persist a contract: log to WAL, then async to Postgres."
   def persist_contract(%AmmoniaDesk.Contracts.Contract{} = contract) do
+    # Step 1: Snapshot log (synchronous — on disk before we return)
+    log_result = SnapshotLog.append(:contract, contract)
+
+    if log_result != :ok do
+      Logger.warning("SnapshotLog: contract #{contract.id} log failed: #{inspect(log_result)}")
+    end
+
+    # Step 2: Postgres (async — never blocks the caller)
     Task.Supervisor.start_child(
       AmmoniaDesk.Contracts.TaskSupervisor,
       fn -> do_persist_contract(contract) end
     )
   end
 
-  @doc "Persist a solve audit with its contract links."
+  @doc "Persist a solve audit: log to WAL, then async to Postgres."
   def persist_solve_audit(%AmmoniaDesk.Solver.SolveAudit{} = audit) do
+    log_result = SnapshotLog.append(:audit, audit)
+
+    if log_result != :ok do
+      Logger.warning("SnapshotLog: audit #{audit.id} log failed: #{inspect(log_result)}")
+    end
+
     Task.Supervisor.start_child(
       AmmoniaDesk.Contracts.TaskSupervisor,
       fn -> do_persist_solve_audit(audit) end
     )
   end
 
-  @doc "Persist a saved scenario."
+  @doc "Persist a saved scenario: log to WAL, then async to Postgres."
   def persist_scenario(scenario) when is_map(scenario) do
+    log_result = SnapshotLog.append(:scenario, scenario)
+
+    if log_result != :ok do
+      Logger.warning("SnapshotLog: scenario log failed: #{inspect(log_result)}")
+    end
+
     Task.Supervisor.start_child(
       AmmoniaDesk.Contracts.TaskSupervisor,
       fn -> do_persist_scenario(scenario) end
@@ -87,12 +102,10 @@ defmodule AmmoniaDesk.DB.Writer do
 
   defp do_persist_solve_audit(audit) do
     Repo.transaction(fn ->
-      # 1. Insert the audit record
       attrs = SolveAuditRecord.from_solve_audit(audit)
 
       case %SolveAuditRecord{} |> SolveAuditRecord.changeset(attrs) |> Repo.insert() do
         {:ok, _record} ->
-          # 2. Insert contract links (join table)
           for contract_snap <- (audit.contracts_used || []) do
             %SolveAuditContract{}
             |> SolveAuditContract.changeset(%{

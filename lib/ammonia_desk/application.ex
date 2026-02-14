@@ -5,6 +5,7 @@ defmodule AmmoniaDesk.Application do
   def start(_type, _args) do
     children = [
       AmmoniaDesk.Repo,
+      AmmoniaDesk.DB.SnapshotLog,
       {Phoenix.PubSub, name: AmmoniaDesk.PubSub},
       AmmoniaDesk.Data.LiveState,
       AmmoniaDesk.Data.Poller,
