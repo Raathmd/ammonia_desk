@@ -34,6 +34,7 @@ defmodule AmmoniaDesk.Contracts.Pipeline do
     DocumentReader,
     Parser,
     Store,
+    HashVerifier,
     SapValidator,
     TemplateValidator,
     LlmValidator,
@@ -175,7 +176,8 @@ defmodule AmmoniaDesk.Contracts.Pipeline do
   All local, no external calls.
   """
   def extract(file_path, counterparty, counterparty_type, product_group, opts \\ []) do
-    with {:read, {:ok, text}} <- {:read, DocumentReader.read(file_path)} do
+    with {:read, {:ok, text}} <- {:read, DocumentReader.read(file_path)},
+         {:hash, {:ok, file_hash, file_size}} <- {:hash, HashVerifier.compute_file_hash(file_path)} do
       {clauses, warnings, detected_family} = Parser.parse(text)
 
       if length(warnings) > 0 do
@@ -186,14 +188,14 @@ defmodule AmmoniaDesk.Contracts.Pipeline do
       end
 
       # Auto-detect family if not specified in opts
-      {family_direction, family_incoterm, family_term_type} =
+      {family_id, family_direction, family_incoterm, family_term_type} =
         case detected_family do
-          {:ok, _family_id, family} ->
-            {family.direction,
+          {:ok, fid, family} ->
+            {fid, family.direction,
              List.first(family.default_incoterms),
              family.term_type}
           _ ->
-            {nil, nil, nil}
+            {nil, nil, nil, nil}
         end
 
       contract = %Contract{
@@ -209,13 +211,21 @@ defmodule AmmoniaDesk.Contracts.Pipeline do
         clauses: clauses,
         contract_date: Keyword.get(opts, :contract_date),
         expiry_date: Keyword.get(opts, :expiry_date),
-        sap_contract_id: Keyword.get(opts, :sap_contract_id)
+        sap_contract_id: Keyword.get(opts, :sap_contract_id),
+        # Hash and inventory fields
+        family_id: family_id,
+        file_hash: file_hash,
+        file_size: file_size,
+        network_path: Keyword.get(opts, :network_path) || file_path,
+        verification_status: :pending
       }
 
       Store.ingest(contract)
     else
       {:read, {:error, reason}} ->
         {:error, {:document_read_failed, reason}}
+      {:hash, {:error, reason}} ->
+        {:error, {:hash_failed, reason}}
     end
   end
 

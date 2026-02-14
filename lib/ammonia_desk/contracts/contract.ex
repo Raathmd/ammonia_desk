@@ -38,6 +38,15 @@ defmodule AmmoniaDesk.Contracts.Contract do
     :reviewed_at,        # timestamp of review
     :review_notes,       # legal reviewer comments
     :open_position,      # current open position in tons (from SAP/ERP)
+    # --- Document integrity ---
+    :contract_number,    # parsed from contract (e.g., "TRAMMO-LTP-2026-0001")
+    :family_id,          # detected contract family (e.g., "VESSEL_SPOT_PURCHASE")
+    :file_hash,          # SHA-256 hex of original document bytes
+    :file_size,          # size in bytes of original document
+    :network_path,       # original network location (UNC path, SharePoint URL, etc.)
+    :last_verified_at,   # when file hash was last checked against network copy
+    :verification_status, # :verified | :mismatch | :file_not_found | :pending | :error
+    :previous_hash,      # hash of the previous version (audit chain)
     :created_at,
     :updated_at
   ]
@@ -49,6 +58,8 @@ defmodule AmmoniaDesk.Contracts.Contract do
   @type term_type :: :spot | :long_term
   @type company :: :trammo_inc | :trammo_sas | :trammo_dmcc
   @type status :: :draft | :pending_review | :approved | :rejected
+
+  @type verification_status :: :verified | :mismatch | :file_not_found | :pending | :error
 
   @type t :: %__MODULE__{
     id: String.t() | nil,
@@ -76,6 +87,14 @@ defmodule AmmoniaDesk.Contracts.Contract do
     reviewed_at: DateTime.t() | nil,
     review_notes: String.t() | nil,
     open_position: number() | nil,
+    contract_number: String.t() | nil,
+    family_id: String.t() | nil,
+    file_hash: String.t() | nil,
+    file_size: non_neg_integer() | nil,
+    network_path: String.t() | nil,
+    last_verified_at: DateTime.t() | nil,
+    verification_status: verification_status() | nil,
+    previous_hash: String.t() | nil,
     created_at: DateTime.t() | nil,
     updated_at: DateTime.t() | nil
   }

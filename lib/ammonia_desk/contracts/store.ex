@@ -77,6 +77,16 @@ defmodule AmmoniaDesk.Contracts.Store do
     GenServer.call(__MODULE__, {:update_llm_validation, contract_id, validation_result})
   end
 
+  @doc "Update hash verification results on a contract"
+  def update_verification(contract_id, verification_result) do
+    GenServer.call(__MODULE__, {:update_verification, contract_id, verification_result})
+  end
+
+  @doc "List all contracts across all product groups"
+  def list_all do
+    GenServer.call(__MODULE__, :list_all)
+  end
+
   @doc "Get all unique counterparties in a product group"
   def counterparties(product_group) do
     GenServer.call(__MODULE__, {:counterparties, product_group})
@@ -299,6 +309,32 @@ defmodule AmmoniaDesk.Contracts.Store do
       [] ->
         {:reply, {:error, :not_found}, state}
     end
+  end
+
+  @impl true
+  def handle_call({:update_verification, contract_id, result}, _from, state) do
+    case :ets.lookup(state.contracts, contract_id) do
+      [{^contract_id, contract}] ->
+        updated = %{contract |
+          verification_status: Map.get(result, :verification_status, contract.verification_status),
+          last_verified_at: Map.get(result, :last_verified_at, contract.last_verified_at),
+          updated_at: DateTime.utc_now()
+        }
+        :ets.insert(state.contracts, {contract_id, updated})
+        {:reply, {:ok, updated}, state}
+      [] ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:list_all, _from, state) do
+    contracts =
+      :ets.tab2list(state.contracts)
+      |> Enum.map(fn {_id, contract} -> contract end)
+      |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
+
+    {:reply, contracts, state}
   end
 
   @impl true
