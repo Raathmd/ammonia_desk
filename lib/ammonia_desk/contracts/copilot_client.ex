@@ -1,22 +1,32 @@
 defmodule AmmoniaDesk.Contracts.CopilotClient do
   @moduledoc """
-  LLM client for on-demand clause extraction.
+  LLM client for on-demand clause extraction from SharePoint files.
 
   Called by ScanCoordinator when a contract file needs to be extracted.
-  This module does one thing: send document text to the Copilot LLM
-  and return structured clause data.
+  Two modes:
 
-  It does NOT:
-  - Scan folders (ScanCoordinator + NetworkScanner do that)
-  - Download files (NetworkScanner does that)
-  - Compare hashes (ScanCoordinator does that)
-  - Persist contracts (CopilotIngestion does that)
+    1. `extract_file/3` — given a Graph API file reference (drive_id + item_id),
+       fetches the file content via Graph API, extracts text, sends to LLM.
+       Copilot handles all file access — Zig scanner never downloads content.
 
-  ## Usage
+    2. `extract_text/1` — given pre-extracted text, sends directly to LLM.
+       Used when text is already available (e.g. from a local file test).
 
-      text = DocumentReader.read("contract.docx")
-      {:ok, extraction} = CopilotClient.extract_text(text)
-      # extraction = %{"clauses" => [...], "counterparty" => "Koch", ...}
+  ## Architecture
+
+  ```
+  ScanCoordinator: "this file changed, extract it"
+       │
+       ▼
+  CopilotClient.extract_file(drive_id, item_id, token)
+       │
+       ├── Graph API: download file content
+       ├── DocumentReader: convert binary → text
+       └── LLM: extract clauses from text
+       │
+       ▼
+  Returns: {:ok, %{"clauses" => [...], "counterparty" => "Koch", ...}}
+  ```
 
   ## Configuration
 
@@ -26,24 +36,81 @@ defmodule AmmoniaDesk.Contracts.CopilotClient do
     COPILOT_TIMEOUT   — request timeout in ms (default: 120000)
   """
 
-  alias AmmoniaDesk.Contracts.TemplateRegistry
+  alias AmmoniaDesk.Contracts.{TemplateRegistry, DocumentReader}
 
   require Logger
 
   @default_timeout 120_000
   @default_model "gpt-4o"
+  @graph_base "https://graph.microsoft.com/v1.0"
+  @max_concurrent_extractions 4
 
   # ──────────────────────────────────────────────────────────
   # PUBLIC API
   # ──────────────────────────────────────────────────────────
 
   @doc """
-  Extract structured clause data from contract text.
+  Extract clauses from a SharePoint file by reference.
 
-  Sends the text + canonical clause inventory to the LLM.
-  Returns a map with clauses, counterparty, incoterm, etc.
+  Downloads the file via Graph API, extracts text, sends to LLM.
+  Copilot handles all file access — Zig scanner never downloads content.
 
-  This is the only function ScanCoordinator calls.
+  Returns:
+    {:ok, %{"clauses" => [...], "counterparty" => "Koch", ...}}
+  """
+  @spec extract_file(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def extract_file(drive_id, item_id, graph_token, opts \\ []) do
+    filename = Keyword.get(opts, :filename, "document")
+
+    with {:ok, config} <- get_config(),
+         {:ok, content} <- download_from_graph(drive_id, item_id, graph_token),
+         {:ok, text} <- extract_text_from_binary(content, filename),
+         {:ok, extraction} <- call_llm(text, config) do
+      {:ok, Map.merge(extraction, %{
+        "graph_drive_id" => drive_id,
+        "graph_item_id" => item_id,
+        "file_size" => byte_size(content),
+        "file_hash" => sha256(content)
+      })}
+    end
+  end
+
+  @doc """
+  Extract clauses from multiple SharePoint files concurrently.
+
+  Each file is a map: %{drive_id, item_id, name, ...}
+  Runs up to #{@max_concurrent_extractions} extractions in parallel.
+
+  Returns a list of {file, result} tuples:
+    [{%{name: "Koch.pdf", ...}, {:ok, extraction}}, ...]
+  """
+  @spec extract_files([map()], String.t(), keyword()) :: [{map(), {:ok, map()} | {:error, term()}}]
+  def extract_files(files, graph_token, _opts \\ []) do
+    files
+    |> Task.async_stream(
+      fn file ->
+        drive_id = file["drive_id"] || file[:drive_id]
+        item_id = file["item_id"] || file[:item_id]
+        name = file["name"] || file[:name] || "document"
+
+        result = extract_file(drive_id, item_id, graph_token, filename: name)
+        {file, result}
+      end,
+      max_concurrency: @max_concurrent_extractions,
+      timeout: @default_timeout + 30_000,
+      on_timeout: :kill_task
+    )
+    |> Enum.map(fn
+      {:ok, {file, result}} -> {file, result}
+      {:exit, :timeout} -> {%{}, {:error, :extraction_timeout}}
+    end)
+  end
+
+  @doc """
+  Extract structured clause data from pre-extracted contract text.
+
+  Used when text is already available (e.g. local file test).
   """
   @spec extract_text(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def extract_text(contract_text, _opts \\ []) do
@@ -197,6 +264,46 @@ defmodule AmmoniaDesk.Contracts.CopilotClient do
       "incoterms=[#{Enum.join(Enum.map(f.default_incoterms, &to_string/1), ", ")}]"
     end)
     |> Enum.join("\n")
+  end
+
+  # ──────────────────────────────────────────────────────────
+  # GRAPH API FILE ACCESS
+  # ──────────────────────────────────────────────────────────
+
+  defp download_from_graph(drive_id, item_id, graph_token) do
+    url = "#{@graph_base}/drives/#{drive_id}/items/#{item_id}/content"
+
+    case Req.get(url,
+           headers: [{"authorization", graph_token}],
+           receive_timeout: 60_000,
+           max_redirects: 3) do
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        {:ok, body}
+
+      {:ok, %{status: status, body: body}} ->
+        Logger.error("Graph file download failed (#{status}): #{inspect(body)}")
+        {:error, {:graph_download_failed, status}}
+
+      {:error, reason} ->
+        Logger.error("Graph file download error: #{inspect(reason)}")
+        {:error, {:graph_download_error, reason}}
+    end
+  end
+
+  defp extract_text_from_binary(content, filename) do
+    ext = Path.extname(filename)
+    tmp_path = Path.join(System.tmp_dir!(), "copilot_#{:erlang.unique_integer([:positive])}#{ext}")
+
+    try do
+      File.write!(tmp_path, content)
+      DocumentReader.read(tmp_path)
+    after
+      File.rm(tmp_path)
+    end
+  end
+
+  defp sha256(content) do
+    :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
   end
 
   # ──────────────────────────────────────────────────────────

@@ -14,12 +14,12 @@ defmodule AmmoniaDesk.Contracts.ScanCoordinator do
      - Hash not in DB           → new file → request Copilot extraction
      - Hash differs from DB     → changed file → request Copilot re-extraction
      - Hash matches DB          → unchanged → skip
-  4. For each file needing extraction:
-     a. App tells Zig scanner to fetch the file (returns content + SHA-256)
-     b. App extracts text from binary (DocumentReader)
-     c. App sends text to Copilot LLM for clause extraction
-     d. App ingests extraction as a versioned contract
-  5. App persists contract data and uses it in LP solves
+  4. Sends all new/changed files to Copilot in a batch:
+     - CopilotClient downloads each file from Graph API
+     - CopilotClient extracts text + sends to LLM
+     - CopilotClient returns structured clauses per file
+  5. App ingests extractions as versioned contracts
+  6. Contracts available for LP solver
 
   ```
   App (this module)
@@ -29,16 +29,13 @@ defmodule AmmoniaDesk.Contracts.ScanCoordinator do
     │
     ├── compares hashes against Store (its own database)
     │
-    ├── for each new/changed file:
-    │     ├── "scanner, download this file"
-    │     │     └── Zig scanner → Graph API (download + SHA-256)
-    │     │
-    │     ├── DocumentReader.read(content)  → plain text
-    │     │
-    │     ├── "copilot, extract clauses from this text"
-    │     │     └── CopilotClient.extract_text/2  → structured clauses
-    │     │
-    │     └── CopilotIngestion.ingest_with_hash/2  → versioned contract
+    ├── "copilot, extract these files" (batch)
+    │     └── CopilotClient.extract_files/2
+    │           ├── Graph API: download each file
+    │           ├── DocumentReader: convert binary → text
+    │           └── LLM: extract clauses from text
+    │
+    ├── CopilotIngestion.ingest_with_hash/2 per file → versioned contracts
     │
     └── contracts available for LP solver
   ```
@@ -47,7 +44,6 @@ defmodule AmmoniaDesk.Contracts.ScanCoordinator do
   alias AmmoniaDesk.Contracts.{
     CopilotClient,
     CopilotIngestion,
-    DocumentReader,
     NetworkScanner,
     Store,
     CurrencyTracker
@@ -237,10 +233,10 @@ defmodule AmmoniaDesk.Contracts.ScanCoordinator do
   end
 
   # ──────────────────────────────────────────────────────────
-  # STEP 3: Process the diff — ingest new, re-ingest changed
+  # STEP 3: Process the diff — send all files to Copilot as batch
   # ──────────────────────────────────────────────────────────
 
-  defp process_diff(diff, product_group, opts) do
+  defp process_diff(diff, product_group, _opts) do
     # Mark unchanged contracts as verified
     Enum.each(diff.unchanged, fn {_file, contract} ->
       Store.update_verification(contract.id, %{
@@ -249,71 +245,94 @@ defmodule AmmoniaDesk.Contracts.ScanCoordinator do
       })
     end)
 
-    # Ingest new files
-    new_results =
-      Enum.map(diff.new, fn file ->
-        ingest_file(file, nil, product_group, opts)
+    # Collect all files that need extraction (new + changed)
+    all_new = Enum.map(diff.new, fn file -> {file, nil} end)
+    all_changed = diff.changed  # already {file, existing_contract} tuples
+
+    files_to_extract = all_new ++ all_changed
+
+    if length(files_to_extract) == 0 do
+      {:ok, %{new: [], changed: []}}
+    else
+      # Get Graph API token for CopilotClient to download files
+      case NetworkScanner.graph_token() do
+        {:ok, graph_token} ->
+          batch_extract_and_ingest(files_to_extract, graph_token, product_group, diff)
+
+        {:error, reason} ->
+          Logger.error("Cannot get Graph token for extraction: #{inspect(reason)}")
+          {:error, {:token_error, reason}}
+      end
+    end
+  end
+
+  # ──────────────────────────────────────────────────────────
+  # BATCH EXTRACTION VIA COPILOT
+  #
+  # Sends all files to CopilotClient.extract_files/2 which:
+  #   1. Downloads each file from Graph API
+  #   2. Extracts text via DocumentReader
+  #   3. Sends text to LLM for clause extraction
+  # Then ingests each extraction as a versioned contract.
+  # ──────────────────────────────────────────────────────────
+
+  defp batch_extract_and_ingest(files_to_extract, graph_token, product_group, diff) do
+    # Build file list for CopilotClient (just the file metadata)
+    file_list = Enum.map(files_to_extract, fn {file, _existing} -> file end)
+
+    count = length(file_list)
+    Logger.info("Sending #{count} file(s) to Copilot for extraction")
+    broadcast(:batch_extraction_started, %{file_count: count})
+
+    # CopilotClient downloads + extracts all files concurrently
+    extraction_results = CopilotClient.extract_files(file_list, graph_token)
+
+    # Match results back to existing contracts for ingestion
+    results =
+      Enum.zip(files_to_extract, extraction_results)
+      |> Enum.map(fn {{file, existing_contract}, {_file_ref, extract_result}} ->
+        name = file["name"] || "unknown"
+
+        case extract_result do
+          {:ok, extraction} ->
+            ingest_extraction(extraction, file, existing_contract, product_group)
+
+          {:error, reason} ->
+            Logger.warning("Failed to extract #{name}: #{inspect(reason)}")
+            {name, {:error, reason}}
+        end
       end)
 
-    # Re-ingest changed files (creates new version)
-    changed_results =
-      Enum.map(diff.changed, fn {file, existing_contract} ->
-        ingest_file(file, existing_contract, product_group, opts)
-      end)
+    # Split back into new vs changed for the summary
+    n_new = length(diff.new)
+    {new_results, changed_results} = Enum.split(results, n_new)
+
+    broadcast(:batch_extraction_complete, %{
+      extracted: Enum.count(results, fn {_, r} -> match?({:ok, _}, r) end),
+      failed: Enum.count(results, fn {_, r} -> not match?({:ok, _}, r) end)
+    })
 
     {:ok, %{new: new_results, changed: changed_results}}
   end
 
-  # ──────────────────────────────────────────────────────────
-  # INGEST A SINGLE FILE
-  #
-  # 1. Scanner downloads file → content + SHA-256
-  # 2. DocumentReader extracts text
-  # 3. CopilotClient extracts clauses from text
-  # 4. CopilotIngestion stores versioned contract
-  # ──────────────────────────────────────────────────────────
-
-  defp ingest_file(file, existing_contract, product_group, _opts) do
-    drive_id = file["drive_id"]
-    item_id = file["item_id"]
+  defp ingest_extraction(extraction, file, existing_contract, product_group) do
     name = file["name"] || "unknown"
 
-    Logger.info("Ingesting: #{name}")
+    enriched = Map.merge(extraction, %{
+      "source_file" => name,
+      "source_format" => detect_format(name),
+      "web_url" => file["web_url"]
+    })
 
-    # Step 1: Scanner fetches file content + computes SHA-256
-    with {:ok, fetch_result} <- NetworkScanner.fetch_file(drive_id, item_id),
-         content = fetch_result["content"],
-         sha256 = fetch_result["sha256"],
-         size = fetch_result["size"],
+    ingest_opts = build_ingest_opts(existing_contract, product_group)
 
-         # Step 2: Extract text from binary
-         {:ok, text} <- extract_text(content, name),
+    case CopilotIngestion.ingest_with_hash(enriched, ingest_opts) do
+      {:ok, contract} ->
+        CurrencyTracker.stamp(contract.id, :copilot_extracted_at)
+        action = if existing_contract, do: "re-ingested", else: "ingested"
+        Logger.info("#{action}: #{name} → #{contract.counterparty} v#{contract.version}")
+        {name, {:ok, contract}}
 
-         # Step 3: Copilot LLM extracts clauses
-         {:ok, extraction} <- CopilotClient.extract_text(text),
-
-         # Enrich extraction with file metadata
-         enriched = Map.merge(extraction, %{
-           "file_hash" => sha256,
-           "file_size" => size,
-           "source_file" => name,
-           "source_format" => detect_format(name),
-           "graph_item_id" => item_id,
-           "graph_drive_id" => drive_id,
-           "web_url" => file["web_url"]
-         }),
-
-         # Step 4: Ingest as versioned contract
-         ingest_opts = build_ingest_opts(existing_contract, product_group),
-         {:ok, contract} <- CopilotIngestion.ingest_with_hash(enriched, ingest_opts) do
-
-      CurrencyTracker.stamp(contract.id, :copilot_extracted_at)
-
-      action = if existing_contract, do: "re-ingested", else: "ingested"
-      Logger.info("#{action}: #{name} → #{contract.counterparty} v#{contract.version}")
-
-      {name, {:ok, contract}}
-    else
       {:error, reason} ->
         Logger.warning("Failed to ingest #{name}: #{inspect(reason)}")
         {name, {:error, reason}}
@@ -324,7 +343,7 @@ defmodule AmmoniaDesk.Contracts.ScanCoordinator do
   # DELTA DIFF PROCESSING (for check_existing/2)
   # ──────────────────────────────────────────────────────────
 
-  defp process_delta_diff(diff_result, product_group, opts) do
+  defp process_delta_diff(diff_result, product_group, _opts) do
     changed = Map.get(diff_result, "changed", [])
     unchanged = Map.get(diff_result, "unchanged", [])
     missing = Map.get(diff_result, "missing", [])
@@ -345,26 +364,48 @@ defmodule AmmoniaDesk.Contracts.ScanCoordinator do
       })
     end)
 
-    # Re-ingest changed files
-    re_ingest_results =
+    # Build file list + existing contracts for batch extraction
+    files_to_extract =
       Enum.map(changed, fn entry ->
-        contract_id = entry["id"]
-        drive_id = entry["drive_id"]
-        item_id = entry["item_id"]
-
-        existing = case Store.get(contract_id) do
+        existing = case Store.get(entry["id"]) do
           {:ok, c} -> c
           _ -> nil
         end
 
         file_meta = %{
-          "drive_id" => drive_id,
-          "item_id" => item_id,
+          "drive_id" => entry["drive_id"],
+          "item_id" => entry["item_id"],
           "name" => if(existing, do: existing.source_file, else: "unknown")
         }
 
-        ingest_file(file_meta, existing, product_group, opts)
+        {file_meta, existing}
       end)
+
+    re_ingest_results =
+      if length(files_to_extract) > 0 do
+        case NetworkScanner.graph_token() do
+          {:ok, graph_token} ->
+            file_list = Enum.map(files_to_extract, fn {file, _} -> file end)
+
+            Logger.info("Delta: sending #{length(file_list)} changed file(s) to Copilot")
+            extraction_results = CopilotClient.extract_files(file_list, graph_token)
+
+            Enum.zip(files_to_extract, extraction_results)
+            |> Enum.map(fn {{file, existing}, {_ref, extract_result}} ->
+              name = file["name"] || "unknown"
+              case extract_result do
+                {:ok, extraction} -> ingest_extraction(extraction, file, existing, product_group)
+                {:error, reason} -> {name, {:error, reason}}
+              end
+            end)
+
+          {:error, reason} ->
+            Logger.error("Cannot get Graph token for delta extraction: #{inspect(reason)}")
+            [{:error, {:token_error, reason}}]
+        end
+      else
+        []
+      end
 
     succeeded = Enum.count(re_ingest_results, fn {_, r} -> match?({:ok, _}, r) end)
     failed = Enum.count(re_ingest_results, fn {_, r} -> not match?({:ok, _}, r) end)
@@ -387,18 +428,6 @@ defmodule AmmoniaDesk.Contracts.ScanCoordinator do
   # ──────────────────────────────────────────────────────────
   # HELPERS
   # ──────────────────────────────────────────────────────────
-
-  defp extract_text(content, filename) do
-    ext = Path.extname(filename)
-    tmp_path = Path.join(System.tmp_dir!(), "scan_#{:erlang.unique_integer([:positive])}#{ext}")
-
-    try do
-      File.write!(tmp_path, content)
-      DocumentReader.read(tmp_path)
-    after
-      File.rm(tmp_path)
-    end
-  end
 
   defp build_ingest_opts(nil, product_group) do
     [product_group: product_group]

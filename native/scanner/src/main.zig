@@ -1,25 +1,28 @@
 // Contract Scanner — Zig native binary called from Elixir via Port.
 //
-// This is a utility. The Elixir app initiates all scans and decides
-// what to do with the results.
+// This is a hash provider. It tells Elixir what files exist on SharePoint
+// and whether their hashes changed. That's it.
 //
-// Responsibilities:
-//   1. List contract files in a SharePoint folder (metadata + hashes)
+// Responsibilities (and ONLY these):
+//   1. List contract files in a SharePoint folder — returns metadata + hashes
 //   2. Compare app-provided hashes against current Graph API hashes
-//      (the app sends stored hashes, Zig hits Graph API and returns the diff)
-//   3. Download a specific file and compute SHA-256 on raw bytes
-//   4. Hash a local file (testing / UNC fallback)
+//   3. Hash a local file (testing / UNC fallback)
 //
-// The app decides: when to scan, what hashes to compare, what to ingest.
-// This binary only does I/O and hashing.
+// What it does NOT do:
+//   - Download file content (Copilot accesses files via Graph API directly)
+//   - Extract clauses (Copilot does that)
+//   - Decide what to ingest (the app does that)
+//
+// Elixir stores {item_id, drive_id, filename, sha256} from scan results.
+// On subsequent runs, Elixir sends those stored hashes back via diff_hashes
+// and the scanner tells it what changed.
 //
 // Protocol: JSON lines over stdin/stdout.
 //
 // Commands:
 //   ping        — health check
 //   scan        — list files + hashes from a SharePoint folder
-//   diff_hashes — app sends stored hashes, scanner returns new/changed/unchanged
-//   fetch       — download one file, return content + SHA-256
+//   diff_hashes — batch-compare app's stored hashes against Graph API
 //   hash_local  — SHA-256 of a local file
 
 const std = @import("std");
@@ -93,8 +96,6 @@ fn handleCommand(
         try cmdScan(allocator, root, stdout, stderr);
     } else if (mem.eql(u8, cmd, "diff_hashes")) {
         try cmdDiffHashes(allocator, root, stdout, stderr);
-    } else if (mem.eql(u8, cmd, "fetch")) {
-        try cmdFetch(allocator, root, stdout, stderr);
     } else if (mem.eql(u8, cmd, "hash_local")) {
         try cmdHashLocal(allocator, root, stdout);
     } else {
@@ -111,15 +112,16 @@ fn cmdPing(stdout: anytype, allocator: mem.Allocator) !void {
     defer obj.deinit();
     try obj.put("status", json.Value{ .string = "ok" });
     try obj.put("scanner", json.Value{ .string = "contract_scanner" });
-    try obj.put("version", json.Value{ .string = "1.0.0" });
+    try obj.put("version", json.Value{ .string = "1.1.0" });
     try writeJsonLine(stdout, allocator, json.Value{ .object = obj });
 }
 
 // ─────────────────────────────────────────────────────────────
 // CMD: scan — list files + hashes from a SharePoint folder
 //
-// Returns the current state of the folder. The app compares
-// these results against its database to decide what to ingest.
+// Graph API provides SHA-256 hashes as file metadata.
+// Elixir stores {item_id, drive_id, filename, sha256} for later
+// comparison via diff_hashes.
 //
 // Input:
 //   {"cmd": "scan", "token": "Bearer ...",
@@ -226,13 +228,11 @@ fn cmdScan(
 }
 
 // ─────────────────────────────────────────────────────────────
-// CMD: diff_hashes — compare app-provided hashes against Graph API
+// CMD: diff_hashes — compare app's stored hashes against Graph API
 //
-// The app sends its known hashes. Zig hits Graph API for each file's
-// current hash and returns the diff. No file downloads — metadata only.
-//
-// This keeps the round-trip efficient: one command, batch comparison,
-// one response. The app doesn't need N individual Graph API calls.
+// Elixir sends the hashes it stored from previous scans.
+// Zig hits Graph API for each file's current hash (metadata only,
+// no downloads) and returns what's different.
 //
 // Input:
 //   {"cmd": "diff_hashes", "token": "Bearer ...",
@@ -243,17 +243,10 @@ fn cmdScan(
 //
 // Output:
 //   {"status": "ok",
-//    "new": [],           (files on Graph not in known list — from scan)
-//    "changed": [         (hash differs)
-//      {"id": "contract-uuid", "item_id": "...", "drive_id": "...",
-//       "old_hash": "abc123", "new_hash": "def456", "size": 145320}
-//    ],
-//    "unchanged": [       (hash matches)
-//      {"id": "contract-uuid", "item_id": "..."}
-//    ],
-//    "missing": [         (item_id no longer on Graph)
-//      {"id": "contract-uuid", "item_id": "...", "error": "not_found"}
-//    ]}
+//    "changed": [{"id": "...", "item_id": "...", "drive_id": "...",
+//                  "old_hash": "abc123", "new_hash": "def456", "size": N}],
+//    "unchanged": [{"id": "...", "item_id": "..."}],
+//    "missing": [{"id": "...", "item_id": "...", "error": "..."}]}
 // ─────────────────────────────────────────────────────────────
 
 fn cmdDiffHashes(
@@ -297,7 +290,6 @@ fn cmdDiffHashes(
         const item_id = getStrFromObj(entry_obj, "item_id") orelse continue;
         const old_hash = getStrFromObj(entry_obj, "hash") orelse continue;
 
-        // Get current file metadata from Graph API (no download)
         const url = try std.fmt.allocPrint(
             allocator,
             "https://graph.microsoft.com/v1.0/drives/{s}/items/{s}?$select=file,size",
@@ -326,18 +318,15 @@ fn cmdDiffHashes(
         };
         defer item_parsed.deinit();
 
-        // Extract current hash from Graph metadata
         const current_hash = extractSha256FromItem(item_parsed.value);
 
         if (current_hash) |ch| {
             if (mem.eql(u8, ch, old_hash)) {
-                // Same hash — no change
                 var u = json.ObjectMap.init(allocator);
                 try u.put("id", json.Value{ .string = id });
                 try u.put("item_id", json.Value{ .string = item_id });
                 try unchanged.append(json.Value{ .object = u });
             } else {
-                // Different hash — document changed
                 var c = json.ObjectMap.init(allocator);
                 try c.put("id", json.Value{ .string = id });
                 try c.put("item_id", json.Value{ .string = item_id });
@@ -348,7 +337,6 @@ fn cmdDiffHashes(
                 try changed.append(json.Value{ .object = c });
             }
         } else {
-            // No SHA-256 available — treat as changed to be safe
             var c = json.ObjectMap.init(allocator);
             try c.put("id", json.Value{ .string = id });
             try c.put("item_id", json.Value{ .string = item_id });
@@ -372,68 +360,7 @@ fn cmdDiffHashes(
 }
 
 // ─────────────────────────────────────────────────────────────
-// CMD: fetch — download one file, return content + SHA-256
-//
-// The app calls this after determining a file needs ingestion.
-// ─────────────────────────────────────────────────────────────
-
-fn cmdFetch(
-    allocator: mem.Allocator,
-    root: json.Value,
-    stdout: anytype,
-    stderr: anytype,
-) !void {
-    const token = getStr(root, "token") orelse {
-        try writeError(stdout, allocator, "missing_field", "token is required");
-        return;
-    };
-    const drive_id = getStr(root, "drive_id") orelse {
-        try writeError(stdout, allocator, "missing_field", "drive_id is required");
-        return;
-    };
-    const item_id = getStr(root, "item_id") orelse {
-        try writeError(stdout, allocator, "missing_field", "item_id is required");
-        return;
-    };
-
-    const url = try std.fmt.allocPrint(
-        allocator,
-        "https://graph.microsoft.com/v1.0/drives/{s}/items/{s}/content",
-        .{ drive_id, item_id },
-    );
-    defer allocator.free(url);
-
-    try stderr.print("contract_scanner: fetching {s}/{s}\n", .{ drive_id, item_id });
-
-    const content = graphGet(allocator, url, token) catch |err| {
-        try writeError(stdout, allocator, "fetch_error", @errorName(err));
-        return;
-    };
-    defer allocator.free(content);
-
-    const hash_hex = computeSha256Hex(allocator, content) catch |err| {
-        try writeError(stdout, allocator, "hash_error", @errorName(err));
-        return;
-    };
-    defer allocator.free(hash_hex);
-
-    const b64_len = std.base64.standard.Encoder.calcSize(content.len);
-    const b64_buf = try allocator.alloc(u8, b64_len);
-    defer allocator.free(b64_buf);
-    _ = std.base64.standard.Encoder.encode(b64_buf, content);
-
-    var result = json.ObjectMap.init(allocator);
-    defer result.deinit();
-    try result.put("status", json.Value{ .string = "ok" });
-    try result.put("item_id", json.Value{ .string = item_id });
-    try result.put("sha256", json.Value{ .string = hash_hex });
-    try result.put("size", json.Value{ .integer = @intCast(content.len) });
-    try result.put("content_base64", json.Value{ .string = b64_buf });
-    try writeJsonLine(stdout, allocator, json.Value{ .object = result });
-}
-
-// ─────────────────────────────────────────────────────────────
-// CMD: hash_local
+// CMD: hash_local — SHA-256 of a local file (testing / UNC paths)
 // ─────────────────────────────────────────────────────────────
 
 fn cmdHashLocal(

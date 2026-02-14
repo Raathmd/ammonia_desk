@@ -9,9 +9,9 @@ defmodule AmmoniaDesk.Contracts.NetworkScanner do
 
     scan_folder/2   → `scan`        — list files + hashes from a SharePoint folder
     diff_hashes/1   → `diff_hashes` — batch-compare app's stored hashes against Graph API
-    fetch_file/2    → `fetch`       — download one file, return content + SHA-256
     hash_local/1    → `hash_local`  — SHA-256 of a local file
     ping/0          → `ping`        — health check
+    graph_token/0   → returns current Graph API bearer token for CopilotClient
 
   ## Token Management
 
@@ -79,15 +79,15 @@ defmodule AmmoniaDesk.Contracts.NetworkScanner do
   end
 
   @doc """
-  Download a file from SharePoint. Returns content + SHA-256.
-  Content is raw binary (base64-decoded from scanner response).
+  Get the current Graph API bearer token.
+  Used by CopilotClient to download file content directly.
 
   Returns:
-    {:ok, %{"sha256" => "hex...", "size" => 12345, "content" => <<bytes>>}}
+    {:ok, "Bearer eyJ..."} | {:error, reason}
   """
-  @spec fetch_file(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
-  def fetch_file(drive_id, item_id) do
-    GenServer.call(__MODULE__, {:fetch, drive_id, item_id}, @call_timeout)
+  @spec graph_token() :: {:ok, String.t()} | {:error, term()}
+  def graph_token do
+    GenServer.call(__MODULE__, :graph_token, 5_000)
   end
 
   @doc """
@@ -176,10 +176,9 @@ defmodule AmmoniaDesk.Contracts.NetworkScanner do
     end
   end
 
-  def handle_call({:fetch, drive_id, item_id}, from, state) do
-    with {:ok, token} <- ensure_token(state) do
-      send_and_pend(state, %{cmd: "fetch", token: token, drive_id: drive_id, item_id: item_id}, from)
-    else
+  def handle_call(:graph_token, _from, state) do
+    case ensure_token(state) do
+      {:ok, token} -> {:reply, {:ok, token}, state}
       {:error, reason} -> {:reply, {:error, {:token_error, reason}}, state}
     end
   end
