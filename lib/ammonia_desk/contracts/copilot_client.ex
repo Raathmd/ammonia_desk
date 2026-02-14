@@ -1,21 +1,31 @@
 defmodule AmmoniaDesk.Contracts.CopilotClient do
   @moduledoc """
-  HTTP client for Microsoft 365 Copilot as the primary contract extraction service.
+  HTTP client for the Copilot extraction service.
 
-  Architecture:
-    - Copilot reads actual contract documents and extracts structured clause data
-    - This module sends contract text + the canonical clause inventory as context
-    - Copilot returns structured JSON matching the CopilotIngestion payload format
-    - The app is the system of record (hashing, versioning, validation, LP mapping)
+  Architecture — clean separation of concerns:
+    - Copilot reads contract documents (it has native SharePoint/network access)
+    - Copilot computes the SHA-256 hash of each file it reads
+    - Copilot extracts structured clause data using the canonical inventory
+    - Copilot returns extraction + hash + file metadata to the app
+    - The app never reads contract files directly — Copilot is the only
+      thing touching the documents
 
-  Delta extraction:
-    - First pass scans all contracts (slow — Copilot reads every document)
-    - Subsequent passes check document hashes against network copies
-    - Only changed documents (hash mismatch) are sent to Copilot for re-extraction
-    - Verified documents keep their existing extraction data
+  The app is the system of record:
+    - Stores extractions, hashes, versions
+    - Runs deterministic parser cross-check
+    - Validates against SAP
+    - Gates approval workflow
+    - Feeds LP solver
+
+  Two scan modes:
+    full_scan  — first pass, sends file references to Copilot,
+                 Copilot reads and extracts everything, returns hashes
+    delta_scan — sends known contract hashes to Copilot,
+                 Copilot checks each file, only extracts changed ones,
+                 returns new hashes for those that changed
 
   Configure via environment:
-    COPILOT_ENDPOINT  — Copilot API endpoint (required)
+    COPILOT_ENDPOINT  — Copilot service URL (required)
     COPILOT_API_KEY   — API key or bearer token (required)
     COPILOT_MODEL     — model identifier (default: gpt-4o)
     COPILOT_TIMEOUT   — request timeout in ms (default: 120000)
@@ -23,8 +33,6 @@ defmodule AmmoniaDesk.Contracts.CopilotClient do
 
   alias AmmoniaDesk.Contracts.{
     CopilotIngestion,
-    DocumentReader,
-    HashVerifier,
     Store,
     CurrencyTracker,
     TemplateRegistry
@@ -37,274 +45,177 @@ defmodule AmmoniaDesk.Contracts.CopilotClient do
 
   @default_timeout 120_000
   @default_model "gpt-4o"
-  @max_concurrency 3
 
   # ──────────────────────────────────────────────────────────
-  # SINGLE CONTRACT EXTRACTION
-  # ──────────────────────────────────────────────────────────
-
-  @doc """
-  Send a single contract document to Copilot for extraction.
-
-  1. Reads the document text locally
-  2. Builds a structured prompt with the clause inventory
-  3. Sends to Copilot API
-  4. Parses the response into CopilotIngestion format
-  5. Ingests via CopilotIngestion (hashing, versioning, cross-check)
-
-  Returns {:ok, contract} or {:error, reason}.
-  """
-  @spec extract(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def extract(file_path, opts \\ []) do
-    with {:config, {:ok, config}} <- {:config, get_config()},
-         {:read, {:ok, text}} <- {:read, DocumentReader.read(file_path)},
-         {:copilot, {:ok, extraction}} <- {:copilot, call_copilot(text, config)} do
-      CopilotIngestion.ingest(file_path, extraction, opts)
-    else
-      {:config, {:error, reason}} -> {:error, {:copilot_not_configured, reason}}
-      {:read, {:error, reason}} -> {:error, {:document_read_failed, reason}}
-      {:copilot, {:error, reason}} -> {:error, {:copilot_extraction_failed, reason}}
-    end
-  end
-
-  @doc """
-  Send a contract to Copilot and return the raw extraction payload
-  without ingesting. Useful for preview/review before committing.
-  """
-  @spec extract_preview(String.t()) :: {:ok, map()} | {:error, term()}
-  def extract_preview(file_path) do
-    with {:ok, config} <- get_config(),
-         {:ok, text} <- DocumentReader.read(file_path) do
-      call_copilot(text, config)
-    end
-  end
-
-  # ──────────────────────────────────────────────────────────
-  # FULL SCAN — first pass, all contracts
+  # FULL SCAN — initial ingestion, Copilot reads all files
   # ──────────────────────────────────────────────────────────
 
   @doc """
-  Full scan of all contract files in a directory.
-  This is the initial pass — sends every document to Copilot.
+  Full scan: send file references to Copilot for extraction.
 
-  `manifest` maps filenames to metadata:
-    %{
-      "contract_file.docx" => %{
-        product_group: :ammonia,
-        network_path: "/shared/contracts/contract_file.docx"
-      }
-    }
+  The app does NOT read the files — Copilot has network access and does:
+    1. Read each document from the provided paths/references
+    2. Compute SHA-256 hash of the raw file bytes
+    3. Extract structured clause data using the canonical inventory
+    4. Return extractions + hashes + file metadata
 
-  Returns a summary of extraction results.
+  `file_refs` is a list of file references Copilot can access:
+
+      [
+        %{path: "//server/contracts/Koch_FOB_2026.docx", product_group: :ammonia},
+        %{path: "//server/contracts/Yara_CFR_2026.pdf", product_group: :ammonia},
+        ...
+      ]
+
+  Returns a summary. Each successfully extracted contract is ingested
+  via CopilotIngestion.ingest_with_hash/2 (hash from Copilot, no local read).
   """
-  @spec full_scan(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
-  def full_scan(dir_path, manifest \\ %{}, opts \\ []) do
+  @spec full_scan([map()], keyword()) :: {:ok, map()} | {:error, term()}
+  def full_scan(file_refs, opts \\ []) do
     with {:ok, config} <- get_config() do
-      unless File.dir?(dir_path) do
-        {:error, :directory_not_found}
-      else
-        supported = ~w(.pdf .docx .docm .txt)
+      broadcast(:copilot_full_scan_started, %{file_count: length(file_refs)})
+      Logger.info("Copilot full scan: #{length(file_refs)} files")
 
-        files =
-          File.ls!(dir_path)
-          |> Enum.filter(fn f -> Path.extname(f) in supported end)
-          |> Enum.sort()
-
-        broadcast(:copilot_full_scan_started, %{
-          directory: dir_path,
-          file_count: length(files)
-        })
-
-        Logger.info("Copilot full scan: #{length(files)} files in #{dir_path}")
-
-        results =
-          files
-          |> Task.async_stream(
-            fn filename ->
-              file_path = Path.join(dir_path, filename)
-              file_opts = build_file_opts(filename, file_path, manifest, opts)
-
-              case extract_single(file_path, config, file_opts) do
-                {:ok, contract} -> {filename, {:ok, contract}}
-                {:error, reason} -> {filename, {:error, reason}}
+      results =
+        Enum.map(file_refs, fn ref ->
+          case call_extract(ref, config) do
+            {:ok, extraction} ->
+              ingest_opts = build_ingest_opts(ref, opts)
+              case CopilotIngestion.ingest_with_hash(extraction, ingest_opts) do
+                {:ok, contract} ->
+                  CurrencyTracker.stamp(contract.id, :copilot_extracted_at)
+                  {ref.path, {:ok, contract}}
+                {:error, reason} ->
+                  {ref.path, {:error, {:ingest_failed, reason}}}
               end
-            end,
-            max_concurrency: @max_concurrency,
-            timeout: timeout() * 2
-          )
-          |> Enum.map(fn
-            {:ok, result} -> result
-            {:exit, reason} -> {"unknown", {:error, {:task_failed, reason}}}
-          end)
 
-        succeeded = Enum.count(results, fn {_, r} -> match?({:ok, _}, r) end)
-        failed = Enum.count(results, fn {_, r} -> not match?({:ok, _}, r) end)
+            {:error, reason} ->
+              {ref.path, {:error, reason}}
+          end
+        end)
 
-        failures =
-          results
-          |> Enum.filter(fn {_, r} -> not match?({:ok, _}, r) end)
-          |> Enum.map(fn {f, {:error, reason}} -> {f, reason} end)
+      succeeded = Enum.count(results, fn {_, r} -> match?({:ok, _}, r) end)
+      failed = Enum.count(results, fn {_, r} -> not match?({:ok, _}, r) end)
 
-        broadcast(:copilot_full_scan_complete, %{
-          directory: dir_path,
-          total: length(files),
-          succeeded: succeeded,
-          failed: failed
-        })
+      failures =
+        results
+        |> Enum.filter(fn {_, r} -> not match?({:ok, _}, r) end)
+        |> Enum.map(fn {path, {:error, reason}} -> {path, reason} end)
 
-        Logger.info("Copilot full scan complete: #{succeeded}/#{length(files)} succeeded")
+      broadcast(:copilot_full_scan_complete, %{
+        total: length(file_refs),
+        succeeded: succeeded,
+        failed: failed
+      })
 
-        {:ok, %{
-          directory: dir_path,
-          total: length(files),
-          succeeded: succeeded,
-          failed: failed,
-          failures: failures,
-          scanned_at: DateTime.utc_now()
-        }}
-      end
+      Logger.info("Copilot full scan complete: #{succeeded}/#{length(file_refs)} succeeded")
+
+      {:ok, %{
+        total: length(file_refs),
+        succeeded: succeeded,
+        failed: failed,
+        failures: failures,
+        scanned_at: DateTime.utc_now()
+      }}
     end
   end
 
   # ──────────────────────────────────────────────────────────
-  # DELTA SCAN — only re-extract changed contracts
+  # DELTA SCAN — send known hashes, Copilot checks & re-extracts
   # ──────────────────────────────────────────────────────────
 
   @doc """
-  Delta scan: check which contracts have changed since last extraction
-  and only send those to Copilot.
+  Delta scan: send known contract hashes to Copilot.
+
+  Copilot checks each file on the network:
+    - Computes current hash of the file at network_path
+    - Compares against the hash the app provided
+    - Only extracts files whose hashes differ (document changed)
+    - Returns: changed extractions + new hashes, plus a list of unchanged
+
+  This is dramatically faster than full_scan after the initial pass.
+  The app sends one request with all known contracts, Copilot returns
+  only the delta.
 
   Flow:
-    1. Hash-verify all contracts in the product group against network copies
-    2. Filter to only mismatches and new files
-    3. Send only changed documents to Copilot for re-extraction
-    4. Re-ingest changed contracts (new version, preserving history)
-
-  This is dramatically faster than a full scan after the initial pass.
-  Returns a summary including which contracts were unchanged vs re-extracted.
+    1. App gathers all contracts for the product group with their stored hashes
+    2. App sends {network_path, stored_hash} pairs to Copilot
+    3. Copilot checks each file, returns changed extractions + unchanged list
+    4. App ingests changed contracts as new versions (hash chain preserved)
   """
   @spec delta_scan(atom(), keyword()) :: {:ok, map()} | {:error, term()}
   def delta_scan(product_group, opts \\ []) do
     with {:ok, config} <- get_config() do
       broadcast(:copilot_delta_scan_started, %{product_group: product_group})
+      Logger.info("Copilot delta scan: #{product_group}")
 
-      Logger.info("Copilot delta scan: checking hashes for #{product_group}")
+      # Gather all known contracts with their hashes
+      contracts = Store.list_by_product_group(product_group)
 
-      # Step 1: Verify all contract hashes against network copies
-      {:ok, verification} = HashVerifier.verify_product_group(product_group)
+      known_hashes =
+        contracts
+        |> Enum.filter(&(&1.network_path && &1.file_hash))
+        |> Enum.map(fn c ->
+          %{
+            contract_id: c.id,
+            network_path: c.network_path,
+            stored_hash: c.file_hash,
+            counterparty: c.counterparty,
+            source_file: c.source_file
+          }
+        end)
 
-      unchanged = verification.verified
-      mismatches = verification.mismatch_details
-      not_found = verification.file_not_found
-
-      Logger.info(
-        "Delta scan hash check: #{unchanged} unchanged, " <>
-        "#{length(mismatches)} changed, #{not_found} missing"
-      )
-
-      broadcast(:copilot_delta_hash_check_complete, %{
-        product_group: product_group,
-        unchanged: unchanged,
-        changed: length(mismatches),
-        missing: not_found
-      })
-
-      # Step 2: Re-extract only changed contracts
-      if length(mismatches) == 0 do
-        broadcast(:copilot_delta_scan_complete, %{
-          product_group: product_group,
-          unchanged: unchanged,
-          re_extracted: 0,
-          failed: 0
-        })
-
-        Logger.info("Delta scan complete: all contracts current, nothing to re-extract")
+      if length(known_hashes) == 0 do
+        Logger.info("Delta scan: no contracts with hashes for #{product_group}, nothing to check")
 
         {:ok, %{
           product_group: product_group,
-          unchanged: unchanged,
+          unchanged: 0,
           re_extracted: 0,
           failed: 0,
-          details: [],
           scanned_at: DateTime.utc_now()
         }}
       else
-        results =
-          mismatches
-          |> Task.async_stream(
-            fn mismatch ->
-              contract_id = mismatch.contract_id
-              re_extract_contract(contract_id, config, opts)
-            end,
-            max_concurrency: @max_concurrency,
-            timeout: timeout() * 2
-          )
-          |> Enum.map(fn
-            {:ok, result} -> result
-            {:exit, reason} -> {:error, {:task_failed, reason}}
-          end)
+        case call_delta_check(known_hashes, config) do
+          {:ok, delta_result} ->
+            process_delta_result(delta_result, product_group, opts)
 
-        succeeded = Enum.count(results, &match?({:ok, _}, &1))
-        failed = Enum.count(results, &(not match?({:ok, _}, &1)))
-
-        broadcast(:copilot_delta_scan_complete, %{
-          product_group: product_group,
-          unchanged: unchanged,
-          re_extracted: succeeded,
-          failed: failed
-        })
-
-        Logger.info(
-          "Delta scan complete: #{unchanged} unchanged, " <>
-          "#{succeeded} re-extracted, #{failed} failed"
-        )
-
-        {:ok, %{
-          product_group: product_group,
-          unchanged: unchanged,
-          re_extracted: succeeded,
-          failed: failed,
-          details: results,
-          scanned_at: DateTime.utc_now()
-        }}
+          {:error, reason} ->
+            Logger.error("Copilot delta check failed: #{inspect(reason)}")
+            {:error, {:delta_check_failed, reason}}
+        end
       end
     end
   end
 
-  @doc """
-  Delta scan across all product groups.
-  Checks every ingested contract against its network copy.
-  """
+  @doc "Delta scan across all product groups."
   @spec delta_scan_all(keyword()) :: {:ok, map()}
   def delta_scan_all(opts \\ []) do
     product_groups = [:ammonia, :uan, :urea]
 
     results =
       Enum.map(product_groups, fn pg ->
-        {:ok, summary} = delta_scan(pg, opts)
-        {pg, summary}
+        case delta_scan(pg, opts) do
+          {:ok, summary} -> {pg, summary}
+          {:error, reason} -> {pg, %{error: reason}}
+        end
       end)
-
-    total_unchanged = Enum.sum(Enum.map(results, fn {_, s} -> s.unchanged end))
-    total_re_extracted = Enum.sum(Enum.map(results, fn {_, s} -> s.re_extracted end))
 
     {:ok, %{
       by_product_group: Map.new(results),
-      total_unchanged: total_unchanged,
-      total_re_extracted: total_re_extracted,
       scanned_at: DateTime.utc_now()
     }}
   end
 
   # ──────────────────────────────────────────────────────────
-  # ASYNC WRAPPERS — for non-blocking UI integration
+  # ASYNC WRAPPERS — non-blocking for UI
   # ──────────────────────────────────────────────────────────
 
   @doc "Run full scan in a background BEAM task."
-  def full_scan_async(dir_path, manifest \\ %{}, opts \\ []) do
+  def full_scan_async(file_refs, opts \\ []) do
     Task.Supervisor.async_nolink(
       AmmoniaDesk.Contracts.TaskSupervisor,
-      fn -> full_scan(dir_path, manifest, opts) end
+      fn -> full_scan(file_refs, opts) end
     )
   end
 
@@ -325,15 +236,15 @@ defmodule AmmoniaDesk.Contracts.CopilotClient do
   end
 
   # ──────────────────────────────────────────────────────────
-  # AVAILABILITY CHECK
+  # AVAILABILITY
   # ──────────────────────────────────────────────────────────
 
-  @doc "Check if Copilot API is configured and reachable."
+  @doc "Check if Copilot service is configured and reachable."
   @spec available?() :: boolean()
   def available? do
     case get_config() do
       {:ok, config} ->
-        case Req.get(config.endpoint <> "/models",
+        case Req.get(config.endpoint <> "/health",
                headers: auth_headers(config),
                receive_timeout: 5_000
              ) do
@@ -347,233 +258,276 @@ defmodule AmmoniaDesk.Contracts.CopilotClient do
   end
 
   # ──────────────────────────────────────────────────────────
-  # COPILOT API INTERACTION
+  # COPILOT SERVICE CALLS
   # ──────────────────────────────────────────────────────────
 
-  defp call_copilot(contract_text, config) do
-    prompt = build_extraction_prompt(contract_text)
-
+  # Full extraction — Copilot reads the file, hashes it, extracts clauses
+  defp call_extract(file_ref, config) do
     body = %{
+      action: "extract",
+      file_path: file_ref.path,
       model: config.model,
-      messages: [
-        %{role: "system", content: system_prompt()},
-        %{role: "user", content: prompt}
-      ],
-      temperature: 0.1,
-      response_format: %{type: "json_object"}
+      clause_inventory: clause_inventory_payload(),
+      family_signatures: family_signatures_payload(),
+      instructions: extraction_instructions()
     }
 
-    case Req.post(config.endpoint <> "/chat/completions",
+    case post_to_copilot(config, "/extract", body) do
+      {:ok, %{"extraction" => extraction, "file_hash" => hash, "file_size" => size}} ->
+        # Merge hash/size into extraction so ingest_with_hash can use them
+        enriched = Map.merge(extraction, %{
+          "file_hash" => hash,
+          "file_size" => size,
+          "network_path" => file_ref.path,
+          "source_file" => Path.basename(file_ref.path),
+          "source_format" => detect_format_string(file_ref.path)
+        })
+        {:ok, enriched}
+
+      {:ok, %{"clauses" => _} = extraction} ->
+        # Copilot returned flat format with hash at top level
+        {:ok, Map.put_new(extraction, "network_path", file_ref.path)}
+
+      {:ok, other} ->
+        Logger.warning("Unexpected Copilot extract response: #{inspect(Map.keys(other))}")
+        {:error, :unexpected_response_format}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Delta check — Copilot checks file hashes, only extracts changed ones
+  defp call_delta_check(known_hashes, config) do
+    body = %{
+      action: "delta_check",
+      model: config.model,
+      contracts: Enum.map(known_hashes, fn kh ->
+        %{
+          contract_id: kh.contract_id,
+          network_path: kh.network_path,
+          stored_hash: kh.stored_hash
+        }
+      end),
+      clause_inventory: clause_inventory_payload(),
+      family_signatures: family_signatures_payload(),
+      instructions: extraction_instructions()
+    }
+
+    post_to_copilot(config, "/delta", body)
+  end
+
+  defp post_to_copilot(config, path, body) do
+    url = config.endpoint <> path
+
+    case Req.post(url,
            json: body,
            headers: auth_headers(config),
            receive_timeout: timeout()
          ) do
-      {:ok, %{status: 200, body: %{"choices" => [%{"message" => %{"content" => json_str}} | _]}}} ->
-        parse_copilot_response(json_str)
+      {:ok, %{status: 200, body: response}} when is_map(response) ->
+        {:ok, response}
+
+      {:ok, %{status: 200, body: json_str}} when is_binary(json_str) ->
+        case Jason.decode(json_str) do
+          {:ok, parsed} -> {:ok, parsed}
+          {:error, reason} -> {:error, {:json_parse_failed, reason}}
+        end
 
       {:ok, %{status: status, body: body}} ->
-        Logger.error("Copilot API error (#{status}): #{inspect(body)}")
+        Logger.error("Copilot service error (#{status}): #{inspect(body)}")
         {:error, {:api_error, status}}
 
       {:error, reason} ->
-        Logger.error("Copilot API unreachable: #{inspect(reason)}")
+        Logger.error("Copilot service unreachable: #{inspect(reason)}")
         {:error, {:api_unreachable, reason}}
     end
   end
 
-  defp system_prompt do
-    clause_inventory = build_clause_inventory_context()
+  # ──────────────────────────────────────────────────────────
+  # DELTA RESULT PROCESSING
+  # ──────────────────────────────────────────────────────────
 
-    """
-    You are a contract extraction specialist for Trammo's ammonia trading desk.
-    Your task is to read commodity trading contracts and extract structured clause data.
+  # Copilot returns:
+  #   %{
+  #     "changed" => [
+  #       %{"contract_id" => "...", "extraction" => %{...}, "file_hash" => "...", "file_size" => 123}
+  #     ],
+  #     "unchanged" => ["contract_id_1", "contract_id_2", ...],
+  #     "not_found" => ["contract_id_3", ...]
+  #   }
 
-    You MUST return a JSON object with the exact structure specified in the user prompt.
-    Be precise with numerical values — extract exact numbers from the contract text.
-    Preserve original units and currency symbols.
+  defp process_delta_result(delta_result, product_group, opts) do
+    changed = Map.get(delta_result, "changed", [])
+    unchanged = Map.get(delta_result, "unchanged", [])
+    not_found = Map.get(delta_result, "not_found", [])
 
-    ## Known Clause Inventory
+    broadcast(:copilot_delta_hash_check_complete, %{
+      product_group: product_group,
+      unchanged: length(unchanged),
+      changed: length(changed),
+      missing: length(not_found)
+    })
 
-    The following clause types are expected in ammonia trading contracts.
-    Map extracted clauses to these IDs where they match. If you find clauses
-    that don't fit any known type, include them with a new clause_id and add
-    the definition to "new_clause_definitions".
+    Logger.info(
+      "Delta check results: #{length(unchanged)} unchanged, " <>
+      "#{length(changed)} changed, #{length(not_found)} missing"
+    )
 
-    #{clause_inventory}
+    # Update verification status for unchanged contracts
+    Enum.each(unchanged, fn contract_id ->
+      Store.update_verification(contract_id, %{
+        verification_status: :verified,
+        last_verified_at: DateTime.utc_now()
+      })
+    end)
 
-    ## Known Contract Families
+    # Mark missing contracts
+    Enum.each(not_found, fn contract_id ->
+      Store.update_verification(contract_id, %{
+        verification_status: :file_not_found,
+        last_verified_at: DateTime.utc_now()
+      })
+    end)
 
-    #{build_family_context()}
+    # Ingest changed contracts as new versions
+    ingest_results =
+      Enum.map(changed, fn entry ->
+        extraction = Map.get(entry, "extraction", %{})
+        file_hash = Map.get(entry, "file_hash")
+        file_size = Map.get(entry, "file_size")
+        contract_id = Map.get(entry, "contract_id")
 
-    When you identify the contract family, set the "family_id" field accordingly.
-    """
+        enriched = Map.merge(extraction, %{
+          "file_hash" => file_hash,
+          "file_size" => file_size
+        })
+
+        # Get existing contract to carry forward metadata
+        ingest_opts = case Store.get(contract_id) do
+          {:ok, existing} ->
+            [
+              product_group: existing.product_group,
+              network_path: existing.network_path,
+              sap_contract_id: existing.sap_contract_id
+            ] ++ Keyword.take(opts, [:product_group])
+
+          _ ->
+            [product_group: product_group]
+        end
+
+        case CopilotIngestion.ingest_with_hash(enriched, ingest_opts) do
+          {:ok, new_contract} ->
+            CurrencyTracker.stamp(new_contract.id, :copilot_re_extracted_at)
+
+            Logger.info(
+              "Delta re-extraction: #{new_contract.counterparty} " <>
+              "(hash=#{String.slice(file_hash || "", 0, 12)}...)"
+            )
+
+            {:ok, new_contract}
+
+          {:error, reason} ->
+            Logger.warning("Delta ingest failed for #{contract_id}: #{inspect(reason)}")
+            {:error, {:ingest_failed, reason}}
+        end
+      end)
+
+    succeeded = Enum.count(ingest_results, &match?({:ok, _}, &1))
+    failed = Enum.count(ingest_results, &(not match?({:ok, _}, &1)))
+
+    broadcast(:copilot_delta_scan_complete, %{
+      product_group: product_group,
+      unchanged: length(unchanged),
+      re_extracted: succeeded,
+      failed: failed,
+      missing: length(not_found)
+    })
+
+    Logger.info(
+      "Delta scan complete: #{length(unchanged)} current, " <>
+      "#{succeeded} re-extracted, #{failed} failed, #{length(not_found)} missing"
+    )
+
+    {:ok, %{
+      product_group: product_group,
+      unchanged: length(unchanged),
+      re_extracted: succeeded,
+      failed: failed,
+      missing: length(not_found),
+      scanned_at: DateTime.utc_now()
+    }}
   end
 
-  defp build_extraction_prompt(contract_text) do
-    """
-    Extract all clauses from the following contract. Return a JSON object with this structure:
+  # ──────────────────────────────────────────────────────────
+  # PAYLOADS — canonical inventory sent to Copilot as context
+  # ──────────────────────────────────────────────────────────
 
-    {
-      "contract_number": "extracted contract number or null",
-      "counterparty": "counterparty name",
-      "counterparty_type": "supplier" or "customer",
-      "direction": "purchase" or "sale",
-      "incoterm": "FOB" or "CFR" or "CIF" or "DAP" or "CPT" etc.,
-      "term_type": "spot" or "long_term",
-      "company": "trammo_inc" or "trammo_sas" or "trammo_dmcc",
-      "effective_date": "YYYY-MM-DD or null",
-      "expiry_date": "YYYY-MM-DD or null",
-      "family_id": "matched family ID or null",
-      "clauses": [
-        {
-          "clause_id": "PRICE",
-          "category": "commercial",
-          "extracted_fields": {
-            "price_value": 340.00,
-            "price_uom": "$/ton",
-            "pricing_mechanism": "fixed"
-          },
-          "source_text": "exact text from the contract for this clause",
-          "section_ref": "Section 5",
-          "confidence": "high" or "medium" or "low",
-          "anchors_matched": ["Price", "US $"]
-        }
-      ],
-      "new_clause_definitions": [
-        {
-          "clause_id": "NEW_CLAUSE_ID",
-          "category": "category_name",
-          "anchors": ["anchor1", "anchor2"],
-          "extract_fields": ["field1", "field2"],
-          "lp_mapping": null,
-          "level_default": "expected"
-        }
-      ]
-    }
-
-    Rules:
-    - Extract EVERY clause you can identify, not just the known types
-    - For each clause, include the exact source_text from the contract
-    - Extract numerical values precisely (prices, quantities, percentages, rates)
-    - Set confidence to "low" if the extraction is uncertain
-    - Include section_ref if the clause has a numbered section heading
-    - anchors_matched should list which anchor patterns from the inventory matched
-    - new_clause_definitions should only include clauses NOT in the known inventory
-    - If you cannot determine a field, set it to null rather than guessing
-
-    CONTRACT TEXT:
-    ---
-    #{contract_text}
-    ---
-    """
-  end
-
-  defp build_clause_inventory_context do
+  defp clause_inventory_payload do
     TemplateRegistry.canonical_clauses()
-    |> Enum.sort_by(fn {id, _} -> id end)
-    |> Enum.map(fn {clause_id, def} ->
-      fields = Map.get(def, :extract_fields, []) |> Enum.join(", ")
-      anchors = Map.get(def, :anchors, []) |> Enum.join(", ")
-      category = Map.get(def, :category, :unknown)
-
-      "- #{clause_id} (#{category}): anchors=[#{anchors}], fields=[#{fields}]"
+    |> Enum.map(fn {clause_id, definition} ->
+      %{
+        clause_id: clause_id,
+        category: definition.category,
+        anchors: definition.anchors,
+        extract_fields: definition.extract_fields,
+        lp_mapping: definition[:lp_mapping],
+        level_default: definition[:level_default]
+      }
     end)
-    |> Enum.join("\n")
   end
 
-  defp build_family_context do
+  defp family_signatures_payload do
     TemplateRegistry.family_signatures()
-    |> Enum.sort_by(fn {id, _} -> id end)
     |> Enum.map(fn {family_id, family} ->
-      anchors = Map.get(family, :detect_anchors, []) |> Enum.join(", ")
-      dir = Map.get(family, :direction, :unknown)
-      term = Map.get(family, :term_type, :unknown)
-      transport = Map.get(family, :transport, :unknown)
-      incoterms = Map.get(family, :default_incoterms, []) |> Enum.join(", ")
-
-      "- #{family_id}: #{dir}/#{term}/#{transport}, incoterms=[#{incoterms}], detect=[#{anchors}]"
+      %{
+        family_id: family_id,
+        direction: family.direction,
+        term_type: family.term_type,
+        transport: family.transport,
+        default_incoterms: family.default_incoterms,
+        detect_anchors: family.detect_anchors,
+        expected_clause_ids: family.expected_clause_ids
+      }
     end)
-    |> Enum.join("\n")
   end
 
-  defp parse_copilot_response(json_str) do
-    case Jason.decode(json_str) do
-      {:ok, %{"clauses" => clauses} = extraction} when is_list(clauses) ->
-        {:ok, extraction}
+  defp extraction_instructions do
+    """
+    Extract all clauses from the contract document. For each file:
+    1. Read the document bytes and compute SHA-256 hash (hex, lowercase)
+    2. Extract the document text
+    3. Identify all clauses, mapping to the provided clause inventory where possible
+    4. For clauses not in the inventory, create new definitions
+    5. Return the extraction payload with file_hash and file_size included
 
-      {:ok, other} ->
-        Logger.warning("Copilot response missing 'clauses' key: #{inspect(Map.keys(other))}")
-        {:error, :invalid_extraction_format}
-
-      {:error, reason} ->
-        Logger.error("Failed to parse Copilot JSON: #{inspect(reason)}")
-        {:error, {:json_parse_failed, reason}}
-    end
+    Be precise with numerical values. Preserve original units and currencies.
+    Set confidence to "low" for uncertain extractions.
+    Include exact source_text from the contract for each clause.
+    """
   end
 
   # ──────────────────────────────────────────────────────────
-  # PRIVATE HELPERS
+  # HELPERS
   # ──────────────────────────────────────────────────────────
 
-  defp extract_single(file_path, config, opts) do
-    with {:ok, text} <- DocumentReader.read(file_path),
-         {:ok, extraction} <- call_copilot(text, config) do
-      CopilotIngestion.ingest(file_path, extraction, opts)
-    end
-  end
-
-  defp re_extract_contract(contract_id, config, opts) do
-    with {:ok, contract} <- Store.get(contract_id),
-         {:ok, path} <- resolve_network_path(contract),
-         {:ok, text} <- DocumentReader.read(path),
-         {:ok, extraction} <- call_copilot(text, config) do
-      # Carry forward metadata
-      file_opts =
-        [
-          product_group: contract.product_group,
-          network_path: contract.network_path,
-          sap_contract_id: contract.sap_contract_id
-        ] ++ Keyword.take(opts, [:product_group])
-
-      case CopilotIngestion.ingest(path, extraction, file_opts) do
-        {:ok, new_contract} ->
-          CurrencyTracker.stamp(new_contract.id, :copilot_re_extracted_at)
-
-          Logger.info(
-            "Delta re-extraction complete: #{contract.counterparty} " <>
-            "v#{contract.version} → v#{new_contract.version}"
-          )
-
-          {:ok, new_contract}
-
-        {:error, reason} ->
-          {:error, {:reingest_failed, reason}}
-      end
-    end
-  end
-
-  defp resolve_network_path(%{network_path: nil}), do: {:error, :no_network_path}
-  defp resolve_network_path(%{network_path: ""}), do: {:error, :no_network_path}
-  defp resolve_network_path(%{network_path: path}) do
-    if File.exists?(path), do: {:ok, path}, else: {:error, :file_not_found}
-  end
-
-  defp build_file_opts(filename, file_path, manifest, opts) do
+  defp build_ingest_opts(file_ref, opts) do
     default_pg = Keyword.get(opts, :product_group, :ammonia)
 
-    case Map.get(manifest, filename) do
-      %{} = entry ->
-        [
-          product_group: entry[:product_group] || default_pg,
-          network_path: entry[:network_path] || file_path,
-          sap_contract_id: entry[:sap_contract_id]
-        ]
+    [
+      product_group: file_ref[:product_group] || default_pg,
+      network_path: file_ref.path,
+      sap_contract_id: file_ref[:sap_contract_id]
+    ]
+  end
 
-      nil ->
-        [
-          product_group: default_pg,
-          network_path: file_path
-        ]
+  defp detect_format_string(path) do
+    case Path.extname(path) |> String.downcase() do
+      ".pdf" -> "pdf"
+      ".docx" -> "docx"
+      ".docm" -> "docm"
+      ".txt" -> "txt"
+      ext -> ext
     end
   end
 
