@@ -47,6 +47,9 @@ defmodule AmmoniaDesk.Contracts.Contract do
     :last_verified_at,   # when file hash was last checked against network copy
     :verification_status, # :verified | :mismatch | :file_not_found | :pending | :error
     :previous_hash,      # hash of the previous version (audit chain)
+    # --- Graph API identity (for Zig scanner delta checks) ---
+    :graph_item_id,      # SharePoint/OneDrive item ID from Graph API
+    :graph_drive_id,     # SharePoint document library drive ID
     :created_at,
     :updated_at
   ]
@@ -95,6 +98,8 @@ defmodule AmmoniaDesk.Contracts.Contract do
     last_verified_at: DateTime.t() | nil,
     verification_status: verification_status() | nil,
     previous_hash: String.t() | nil,
+    graph_item_id: String.t() | nil,
+    graph_drive_id: String.t() | nil,
     created_at: DateTime.t() | nil,
     updated_at: DateTime.t() | nil
   }
