@@ -322,10 +322,10 @@ defmodule TradingDesk.ScenarioLive do
             Logger.warning("Analyst explain_solve failed: #{inspect(reason)}")
             send(lv_pid, {:explanation_result, {:error, reason}})
         end
-      rescue
-        e ->
-          Logger.error("Analyst explain_solve crashed: #{Exception.message(e)}")
-          send(lv_pid, {:explanation_result, {:error, Exception.message(e)}})
+      catch
+        kind, reason ->
+          Logger.error("Analyst explain_solve crashed: #{kind} #{inspect(reason)}")
+          send(lv_pid, {:explanation_result, {:error, "#{kind}: #{inspect(reason)}"}})
       end
     end)
     {:noreply, socket}
@@ -352,10 +352,10 @@ defmodule TradingDesk.ScenarioLive do
             Logger.warning("Analyst explain_distribution failed: #{inspect(reason)}")
             send(lv_pid, {:explanation_result, {:error, reason}})
         end
-      rescue
-        e ->
-          Logger.error("Analyst explain_distribution crashed: #{Exception.message(e)}")
-          send(lv_pid, {:explanation_result, {:error, Exception.message(e)}})
+      catch
+        kind, reason ->
+          Logger.error("Analyst explain_distribution crashed: #{kind} #{inspect(reason)}")
+          send(lv_pid, {:explanation_result, {:error, "#{kind}: #{inspect(reason)}"}})
       end
     end)
     {:noreply, socket}

@@ -185,14 +185,20 @@ defmodule TradingDesk.Scenarios.AutoRunner do
 
         # Spawn explanation
         spawn(fn ->
-          case TradingDesk.Analyst.explain_agent(result) do
-            {:ok, text} ->
-              Phoenix.PubSub.broadcast(
-                TradingDesk.PubSub,
-                "auto_runner",
-                {:auto_explanation, text}
-              )
-            _ -> :ok
+          try do
+            case TradingDesk.Analyst.explain_agent(result) do
+              {:ok, text} ->
+                Phoenix.PubSub.broadcast(
+                  TradingDesk.PubSub,
+                  "auto_runner",
+                  {:auto_explanation, text}
+                )
+              {:error, reason} ->
+                Logger.warning("Analyst explain_agent failed: #{inspect(reason)}")
+            end
+          catch
+            kind, reason ->
+              Logger.error("Analyst explain_agent crashed: #{kind} #{inspect(reason)}")
           end
         end)
 
