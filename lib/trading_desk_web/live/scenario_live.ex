@@ -34,14 +34,15 @@ defmodule TradingDesk.ScenarioLive do
     end
 
     product_group = :ammonia_domestic
-    live_vars = LiveState.get()
-    auto_result = TradingDesk.Scenarios.AutoRunner.latest()
 
-    # Fetch supplementary data (vessels, tides)
-    vessel_data = LiveState.get_supplementary(:vessel_tracking)
-    tides_data = LiveState.get_supplementary(:tides)
+    # Defensive: GenServer calls may fail if services haven't started yet
+    live_vars = safe_call(fn -> LiveState.get() end, ProductGroup.default_values(product_group))
+    auto_result = safe_call(fn -> TradingDesk.Scenarios.AutoRunner.latest() end, nil)
+    vessel_data = safe_call(fn -> LiveState.get_supplementary(:vessel_tracking) end, nil)
+    tides_data = safe_call(fn -> LiveState.get_supplementary(:tides) end, nil)
+    saved = safe_call(fn -> Store.list("trader_1") end, [])
 
-    # Load frame-driven metadata
+    # Load frame-driven metadata (pure functions — safe)
     frame = ProductGroup.frame(product_group)
     metadata = ProductGroup.variable_metadata(product_group)
     route_names = ProductGroup.route_names(product_group)
@@ -49,17 +50,21 @@ defmodule TradingDesk.ScenarioLive do
     variable_groups = TradingDesk.VariablesDynamic.groups(product_group)
     available_groups = ProductGroup.list_with_info()
 
+    # Ensure current_vars is always a plain map
+    default_vars = ProductGroup.default_values(product_group)
+    current_vars = if is_map(live_vars), do: live_vars, else: default_vars
+
     socket =
       socket
       |> assign(:product_group, product_group)
       |> assign(:frame, frame)
-      |> assign(:live_vars, live_vars)
-      |> assign(:current_vars, live_vars)
+      |> assign(:live_vars, current_vars)
+      |> assign(:current_vars, current_vars)
       |> assign(:overrides, MapSet.new())
       |> assign(:result, nil)
       |> assign(:distribution, nil)
       |> assign(:auto_result, auto_result)
-      |> assign(:saved_scenarios, Store.list("trader_1"))
+      |> assign(:saved_scenarios, saved)
       |> assign(:trader_id, "trader_1")
       |> assign(:metadata, metadata)
       |> assign(:route_names, route_names)
@@ -97,7 +102,9 @@ defmodule TradingDesk.ScenarioLive do
 
   @impl true
   def handle_event("reset", _params, socket) do
-    live = LiveState.get()
+    pg = socket.assigns.product_group
+    live = safe_call(fn -> LiveState.get() end, ProductGroup.default_values(pg))
+    live = if is_map(live), do: live, else: ProductGroup.default_values(pg)
     socket =
       socket
       |> assign(:current_vars, live)
@@ -1383,5 +1390,15 @@ defmodule TradingDesk.ScenarioLive do
         []
       end
     end)
+  end
+
+  # Safe GenServer call — returns fallback if the service isn't running yet
+  defp safe_call(fun, fallback) do
+    try do
+      fun.()
+    catch
+      :exit, _ -> fallback
+      _, _ -> fallback
+    end
   end
 end
