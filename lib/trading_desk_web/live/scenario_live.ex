@@ -458,7 +458,7 @@ defmodule TradingDesk.ScenarioLive do
   def render(assigns) do
     ~H"""
     <div style="background:#080c14;color:#c8d6e5;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace">
-      <%# === TOP BAR === %>
+      <%!-- === TOP BAR === --%>
       <div style="background:#0d1117;border-bottom:1px solid #1b2838;padding:10px 20px;display:flex;justify-content:space-between;align-items:center">
         <div style="display:flex;align-items:center;gap:12px">
           <div style={"width:8px;height:8px;border-radius:50%;background:#{if @auto_result, do: "#10b981", else: "#64748b"};box-shadow:0 0 8px #{if @auto_result, do: "#10b981", else: "transparent"}"}></div>
@@ -486,7 +486,7 @@ defmodule TradingDesk.ScenarioLive do
       </div>
 
       <div style="display:grid;grid-template-columns:400px 1fr;height:calc(100vh - 45px)">
-        <%# === LEFT: VARIABLES === %>
+        <%!-- === LEFT: VARIABLES === --%>
         <div style="background:#0a0f18;border-right:1px solid #1b2838;overflow-y:auto;padding:14px">
           <%= for group <- @variable_groups do %>
             <div style="margin-bottom:14px">
@@ -550,7 +550,7 @@ defmodule TradingDesk.ScenarioLive do
             </div>
           </div>
 
-          <%# === FLEET & TIDES COMPACT === %>
+          <%!-- === FLEET & TIDES COMPACT === --%>
           <%= if @vessel_data || @tides_data do %>
             <div style="border-top:1px solid #1b2838;padding-top:10px;margin-top:10px">
               <div style="font-size:10px;font-weight:700;color:#60a5fa;letter-spacing:1.2px;margin-bottom:6px">FLEET & TIDES</div>
@@ -586,9 +586,9 @@ defmodule TradingDesk.ScenarioLive do
           <% end %>
         </div>
 
-        <%# === RIGHT: TABS === %>
+        <%!-- === RIGHT: TABS === --%>
         <div style="overflow-y:auto;padding:16px">
-          <%# Tab buttons %>
+          <%!-- Tab buttons --%>
           <div style="display:flex;gap:2px;margin-bottom:16px">
             <button phx-click="switch_tab" phx-value-tab="trader"
               style={"padding:8px 16px;border:none;border-radius:6px 6px 0 0;font-size:12px;font-weight:600;cursor:pointer;background:#{if @active_tab == :trader, do: "#111827", else: "transparent"};color:#{if @active_tab == :trader, do: "#e2e8f0", else: "#475569"};border-bottom:2px solid #{if @active_tab == :trader, do: "#38bdf8", else: "transparent"}"}>
@@ -600,7 +600,7 @@ defmodule TradingDesk.ScenarioLive do
             </button>
           </div>
 
-          <%# Pipeline status banner %>
+          <%!-- Pipeline status banner --%>
           <%= if @pipeline_phase do %>
             <div style={"background:#{pipeline_bg(@pipeline_phase)};border:1px solid #{pipeline_border(@pipeline_phase)};border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;font-size:12px"}>
               <div style={"width:8px;height:8px;border-radius:50%;background:#{pipeline_dot(@pipeline_phase)};animation:pulse 1.5s infinite"}></div>
@@ -616,9 +616,9 @@ defmodule TradingDesk.ScenarioLive do
             </div>
           <% end %>
 
-          <%# === TRADER TAB === %>
+          <%!-- === TRADER TAB === --%>
           <%= if @active_tab == :trader do %>
-            <%# Solve result %>
+            <%!-- Solve result --%>
             <%= if @result && @result.status == :optimal do %>
               <div style="background:#111827;border-radius:10px;padding:20px;margin-bottom:16px">
                 <div style="display:flex;justify-content:space-between;align-items:flex-start">
@@ -637,7 +637,7 @@ defmodule TradingDesk.ScenarioLive do
                   <div style="background:#0a0f18;padding:8px;border-radius:6px"><div style="font-size:10px;color:#64748b">ROI</div><div style="font-size:15px;font-weight:700;font-family:monospace"><%= Float.round(@result.roi, 1) %>%</div></div>
                   <div style="background:#0a0f18;padding:8px;border-radius:6px"><div style="font-size:10px;color:#64748b">Capital</div><div style="font-size:15px;font-weight:700;font-family:monospace">$<%= format_number(@result.cost) %></div></div>
                 </div>
-                <%# Routes %>
+                <%!-- Routes --%>
                 <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:12px">
                   <thead><tr style="border-bottom:1px solid #1e293b">
                     <th style="text-align:left;padding:6px;color:#64748b;font-size:11px">Route</th>
@@ -658,7 +658,7 @@ defmodule TradingDesk.ScenarioLive do
                   </tbody>
                 </table>
 
-                <%# Percentile rank if MC has been run %>
+                <%!-- Percentile rank if MC has been run --%>
                 <%= if @distribution do %>
                   <% {pct, desc} = percentile_rank(@result.profit, @distribution) %>
                   <div style="margin-top:12px;padding:10px;background:#0a0f18;border-radius:6px;font-size:12px">
@@ -701,7 +701,7 @@ defmodule TradingDesk.ScenarioLive do
               <% end %>
             </div>
 
-            <%# Monte Carlo distribution %>
+            <%!-- Monte Carlo distribution --%>
             <%= if @distribution do %>
               <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -714,7 +714,7 @@ defmodule TradingDesk.ScenarioLive do
                   <div style="background:#0a0f18;padding:8px;border-radius:4px"><div style="font-size:10px;color:#64748b">P95</div><div style="color:#10b981;font-weight:700;font-family:monospace">$<%= format_number(@distribution.p95) %></div></div>
                 </div>
 
-                <%# Sensitivity %>
+                <%!-- Sensitivity --%>
                 <%= if length(@distribution.sensitivity) > 0 do %>
                   <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:6px;margin-top:12px">TOP RISK DRIVERS</div>
                   <%= for {key, corr} <- @distribution.sensitivity do %>
@@ -730,7 +730,7 @@ defmodule TradingDesk.ScenarioLive do
               </div>
             <% end %>
 
-            <%# === ROUTE MAP === %>
+            <%!-- === ROUTE MAP === --%>
             <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
               <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700;margin-bottom:8px">ROUTE MAP</div>
               <div id={"trader-map-#{@product_group}"} phx-hook="VesselMap" phx-update="ignore"
@@ -738,7 +738,7 @@ defmodule TradingDesk.ScenarioLive do
                 style="height:280px;border-radius:8px;background:#0a0f18"></div>
             </div>
 
-            <%# === FLEET TRACKING (Trader tab) === %>
+            <%!-- === FLEET TRACKING (Trader tab) === --%>
             <%= if @vessel_data && @vessel_data[:vessels] && length(@vessel_data[:vessels]) > 0 do %>
               <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -775,7 +775,7 @@ defmodule TradingDesk.ScenarioLive do
               </div>
             <% end %>
 
-            <%# === TIDES & CURRENTS (Trader tab) === %>
+            <%!-- === TIDES & CURRENTS (Trader tab) === --%>
             <%= if @tides_data do %>
               <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
                 <div style="font-size:10px;color:#818cf8;letter-spacing:1px;font-weight:700;margin-bottom:10px">TIDES & CURRENTS</div>
@@ -814,7 +814,7 @@ defmodule TradingDesk.ScenarioLive do
               </div>
             <% end %>
 
-            <%# Saved scenarios %>
+            <%!-- Saved scenarios --%>
             <%= if length(@saved_scenarios) > 0 do %>
               <div style="background:#111827;border-radius:10px;padding:16px">
                 <div style="font-size:11px;color:#64748b;letter-spacing:1px;margin-bottom:8px">SAVED SCENARIOS</div>
@@ -840,10 +840,10 @@ defmodule TradingDesk.ScenarioLive do
             <% end %>
           <% end %>
 
-          <%# === AGENT TAB === %>
+          <%!-- === AGENT TAB === --%>
           <%= if @active_tab == :agent do %>
             <%= if @auto_result do %>
-              <%# Agent header %>
+              <%!-- Agent header --%>
               <div style="background:#111827;border-radius:10px;padding:20px;margin-bottom:16px">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
                   <div style="display:flex;align-items:center;gap:10px">
@@ -855,7 +855,7 @@ defmodule TradingDesk.ScenarioLive do
                   </span>
                 </div>
 
-                <%# Signal + key metrics %>
+                <%!-- Signal + key metrics --%>
                 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
                   <div style="background:#0a0f18;padding:12px;border-radius:8px;text-align:center">
                     <div style="font-size:10px;color:#64748b;letter-spacing:1px">SIGNAL</div>
@@ -871,7 +871,7 @@ defmodule TradingDesk.ScenarioLive do
                   </div>
                 </div>
 
-                <%# Current live values %>
+                <%!-- Current live values --%>
                 <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:6px">CURRENT LIVE VALUES</div>
                 <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:16px;font-size:12px">
                   <span>🌊 River: <span style="color:#38bdf8;font-weight:600"><%= Float.round(Map.get(@auto_result.center, :river_stage, 0.0), 1) %>ft</span></span>
@@ -882,7 +882,7 @@ defmodule TradingDesk.ScenarioLive do
                   <span>🏭 StL: <span style={"font-weight:600;color:#{if Map.get(@auto_result.center, :stl_outage), do: "#ef4444", else: "#10b981"}"}><%= if Map.get(@auto_result.center, :stl_outage), do: "OUTAGE", else: "ONLINE" %></span></span>
                 </div>
 
-                <%# What triggered this run %>
+                <%!-- What triggered this run --%>
                 <%= if Map.has_key?(@auto_result, :triggers) and length(@auto_result.triggers) > 0 do %>
                   <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:6px">TRIGGERED BY</div>
                   <%= for trigger <- @auto_result.triggers do %>
@@ -902,7 +902,7 @@ defmodule TradingDesk.ScenarioLive do
                 </div>
               <% end %>
 
-              <%# Distribution %>
+              <%!-- Distribution --%>
               <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
                 <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:10px">PROFIT DISTRIBUTION — <%= @auto_result.distribution.n_feasible %>/<%= @auto_result.distribution.n_scenarios %> feasible</div>
                 <%= for {label, val, color} <- [{"P95", @auto_result.distribution.p95, "#10b981"}, {"P75", @auto_result.distribution.p75, "#34d399"}, {"Mean", @auto_result.distribution.mean, "#38bdf8"}, {"P50", @auto_result.distribution.p50, "#38bdf8"}, {"P25", @auto_result.distribution.p25, "#f59e0b"}, {"VaR₅", @auto_result.distribution.p5, "#ef4444"}] do %>
@@ -916,7 +916,7 @@ defmodule TradingDesk.ScenarioLive do
                 <% end %>
               </div>
 
-              <%# Sensitivity %>
+              <%!-- Sensitivity --%>
               <%= if length(@auto_result.distribution.sensitivity) > 0 do %>
                 <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
                   <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:8px">TOP RISK DRIVERS</div>
@@ -932,7 +932,7 @@ defmodule TradingDesk.ScenarioLive do
                 </div>
               <% end %>
 
-              <%# History %>
+              <%!-- History --%>
               <%= if length(@agent_history) > 0 do %>
                 <div style="background:#111827;border-radius:10px;padding:16px">
                   <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:8px">RUN HISTORY</div>
@@ -949,7 +949,7 @@ defmodule TradingDesk.ScenarioLive do
                 </div>
               <% end %>
 
-              <%# === AGENT ROUTE MAP === %>
+              <%!-- === AGENT ROUTE MAP === --%>
               <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
                 <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700;margin-bottom:8px">ROUTE MAP</div>
                 <div id={"agent-map-#{@product_group}"} phx-hook="VesselMap" phx-update="ignore"
@@ -957,7 +957,7 @@ defmodule TradingDesk.ScenarioLive do
                   style="height:280px;border-radius:8px;background:#0a0f18"></div>
               </div>
 
-              <%# === FLEET TRACKING === %>
+              <%!-- === FLEET TRACKING === --%>
               <%= if @vessel_data && @vessel_data[:vessels] && length(@vessel_data[:vessels]) > 0 do %>
                 <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
                   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -991,7 +991,7 @@ defmodule TradingDesk.ScenarioLive do
                       <% end %>
                     </tbody>
                   </table>
-                  <%# Fleet weather from vessel positions %>
+                  <%!-- Fleet weather from vessel positions --%>
                   <%= if @vessel_data[:fleet_weather] && @vessel_data[:fleet_weather][:source] == :fleet_aggregate do %>
                     <div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e293b">
                       <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:4px">FLEET WEATHER (worst-case across positions)</div>
@@ -1026,7 +1026,7 @@ defmodule TradingDesk.ScenarioLive do
                 </div>
               <% end %>
 
-              <%# === TIDES & CURRENTS === %>
+              <%!-- === TIDES & CURRENTS === --%>
               <%= if @tides_data do %>
                 <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
                   <div style="font-size:10px;color:#818cf8;letter-spacing:1px;font-weight:700;margin-bottom:10px">TIDES & CURRENTS</div>

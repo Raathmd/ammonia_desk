@@ -264,7 +264,7 @@ defmodule TradingDesk.ContractsLive do
   def render(assigns) do
     ~H"""
     <div style="background:#080c14;color:#c8d6e5;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace">
-      <%# === TOP BAR === %>
+      <%!-- === TOP BAR === --%>
       <div style="background:#0d1117;border-bottom:1px solid #1b2838;padding:10px 20px;display:flex;justify-content:space-between;align-items:center">
         <div style="display:flex;align-items:center;gap:12px">
           <a href="/" style="color:#64748b;text-decoration:none;font-size:12px">&larr; DESK</a>
@@ -280,7 +280,7 @@ defmodule TradingDesk.ContractsLive do
         </div>
       </div>
 
-      <%# === ROLE TABS === %>
+      <%!-- === ROLE TABS === --%>
       <div style="background:#0d1117;border-bottom:1px solid #1b2838;padding:0 20px;display:flex;gap:2px">
         <%= for {role, label, icon, color} <- [{:trader, "Trader", "📊", "#38bdf8"}, {:legal, "Legal", "⚖️", "#a78bfa"}, {:operations, "Operations", "🏭", "#f59e0b"}] do %>
           <button phx-click="switch_role" phx-value-role={role}
@@ -290,7 +290,7 @@ defmodule TradingDesk.ContractsLive do
         <% end %>
       </div>
 
-      <%# === PIPELINE STATUS BAR === %>
+      <%!-- === PIPELINE STATUS BAR === --%>
       <%= if @pipeline_status do %>
         <div style="background:#0f1729;border-bottom:1px solid #1e293b;padding:8px 20px;font-size:12px;color:#38bdf8;display:flex;align-items:center;gap:8px">
           <div style="width:6px;height:6px;border-radius:50%;background:#38bdf8"></div>
@@ -299,9 +299,9 @@ defmodule TradingDesk.ContractsLive do
       <% end %>
 
       <div style="display:grid;grid-template-columns:400px 1fr;height:calc(100vh - 100px)">
-        <%# === LEFT: CONTRACT LIST + INGEST === %>
+        <%!-- === LEFT: CONTRACT LIST + INGEST === --%>
         <div style="background:#0a0f18;border-right:1px solid #1b2838;overflow-y:auto;padding:14px">
-          <%# Ingest form with template metadata %>
+          <%!-- Ingest form with template metadata --%>
           <div style="margin-bottom:16px;padding:12px;background:#111827;border-radius:8px">
             <div style="font-size:11px;color:#64748b;letter-spacing:1px;margin-bottom:8px">INGEST CONTRACT</div>
             <form phx-submit="extract_contract">
@@ -353,7 +353,7 @@ defmodule TradingDesk.ContractsLive do
             <% end %>
           </div>
 
-          <%# Contract list %>
+          <%!-- Contract list --%>
           <div style="font-size:11px;color:#64748b;letter-spacing:1px;margin-bottom:8px">
             CONTRACTS — <%= @product_group |> to_string() |> String.upcase() %>
             <span style="color:#475569">(<%= length(@contracts) %>)</span>
@@ -387,7 +387,7 @@ defmodule TradingDesk.ContractsLive do
           <% end %>
         </div>
 
-        <%# === RIGHT: ROLE-SPECIFIC PANEL === %>
+        <%!-- === RIGHT: ROLE-SPECIFIC PANEL === --%>
         <div style="overflow-y:auto;padding:16px">
           <%= if @role == :trader do %>
             <%= render_trader_panel(assigns) %>
@@ -408,7 +408,7 @@ defmodule TradingDesk.ContractsLive do
 
   defp render_trader_panel(assigns) do
     ~H"""
-    <%# Master gate (Gate 4) %>
+    <%!-- Master gate (Gate 4) --%>
     <div style="background:#111827;border-radius:10px;padding:20px;margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <span style="font-size:14px;font-weight:700;color:#e2e8f0">MASTER GATE (Gate 4)</span>
@@ -432,7 +432,7 @@ defmodule TradingDesk.ContractsLive do
           </div>
         </div>
 
-        <%# Per-contract gate status %>
+        <%!-- Per-contract gate status --%>
         <div style="font-size:11px;color:#64748b;letter-spacing:1px;margin-bottom:8px">CONTRACT GATE STATUS</div>
         <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:16px">
           <thead><tr style="border-bottom:1px solid #1e293b">
@@ -457,7 +457,7 @@ defmodule TradingDesk.ContractsLive do
           </tbody>
         </table>
 
-        <%# Master blockers %>
+        <%!-- Master blockers --%>
         <%= if length(@gate_report.master_blockers) > 0 do %>
           <div style="font-size:11px;color:#64748b;letter-spacing:1px;margin-bottom:8px">MASTER GATE BLOCKERS</div>
           <%= for b <- @gate_report.master_blockers do %>
@@ -470,7 +470,7 @@ defmodule TradingDesk.ContractsLive do
       <% end %>
     </div>
 
-    <%# Currency report %>
+    <%!-- Currency report --%>
     <%= if @currency_report do %>
       <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -497,7 +497,7 @@ defmodule TradingDesk.ContractsLive do
       </div>
     <% end %>
 
-    <%# Contract constraint preview %>
+    <%!-- Contract constraint preview --%>
     <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <span style="font-size:11px;color:#64748b;letter-spacing:1px">CONTRACT IMPACT PREVIEW</span>
@@ -542,7 +542,7 @@ defmodule TradingDesk.ContractsLive do
     ~H"""
     <%= if @selected_contract do %>
       <% c = @selected_contract %>
-      <%# Contract header %>
+      <%!-- Contract header --%>
       <div style="background:#111827;border-radius:10px;padding:20px;margin-bottom:16px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start">
           <div>
@@ -559,7 +559,7 @@ defmodule TradingDesk.ContractsLive do
           </span>
         </div>
 
-        <%# Template completeness %>
+        <%!-- Template completeness --%>
         <%= if c.template_validation do %>
           <div style="margin-top:16px;padding:12px;border-radius:6px;background:#0a0f18;border:1px solid #1e293b">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -572,7 +572,7 @@ defmodule TradingDesk.ContractsLive do
               <div style="text-align:center"><span style="color:#64748b">SAP</span><br/><span style={"font-weight:700;color:#{if c.sap_validated, do: "#10b981", else: "#64748b"}"}><%= if c.sap_validated, do: "✓", else: "?" %></span></div>
               <div style="text-align:center"><span style="color:#64748b">Blocks</span><br/><span style={"font-weight:700;color:#{if c.template_validation.blocks_submission, do: "#ef4444", else: "#10b981"}"}><%= if c.template_validation.blocks_submission, do: "YES", else: "NO" %></span></div>
             </div>
-            <%# Template findings %>
+            <%!-- Template findings --%>
             <%= if length(c.template_validation.findings) > 0 do %>
               <div style="margin-top:10px">
                 <%= for f <- c.template_validation.findings do %>
@@ -585,7 +585,7 @@ defmodule TradingDesk.ContractsLive do
           </div>
         <% end %>
 
-        <%# LLM validation %>
+        <%!-- LLM validation --%>
         <%= if c.llm_validation do %>
           <div style="margin-top:8px;padding:8px 12px;border-radius:6px;background:#0a0f18;border:1px solid #1e293b;font-size:11px">
             <span style="color:#64748b">LLM Verify:</span>
@@ -594,7 +594,7 @@ defmodule TradingDesk.ContractsLive do
           </div>
         <% end %>
 
-        <%# Action buttons %>
+        <%!-- Action buttons --%>
         <%= if c.status == :draft do %>
           <div style="margin-top:16px">
             <button phx-click="submit_for_review" phx-value-id={c.id}
@@ -634,7 +634,7 @@ defmodule TradingDesk.ContractsLive do
         <% end %>
       </div>
 
-      <%# SAP discrepancies %>
+      <%!-- SAP discrepancies --%>
       <%= if c.sap_discrepancies && length(c.sap_discrepancies) > 0 do %>
         <div style="background:#1c1917;border:1px solid #78350f;border-radius:8px;padding:14px;margin-bottom:16px">
           <div style="font-size:11px;color:#fbbf24;letter-spacing:1px;margin-bottom:8px">SAP DISCREPANCIES (<%= length(c.sap_discrepancies) %>)</div>
@@ -649,7 +649,7 @@ defmodule TradingDesk.ContractsLive do
         </div>
       <% end %>
 
-      <%# Clause list %>
+      <%!-- Clause list --%>
       <div style="background:#111827;border-radius:10px;padding:16px">
         <div style="font-size:11px;color:#64748b;letter-spacing:1px;margin-bottom:10px">EXTRACTED CLAUSES (<%= length(c.clauses || []) %>)</div>
         <%= for clause <- (c.clauses || []) do %>
@@ -699,7 +699,7 @@ defmodule TradingDesk.ContractsLive do
 
   defp render_operations_panel(assigns) do
     ~H"""
-    <%# Batch actions %>
+    <%!-- Batch actions --%>
     <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
       <div style="font-size:11px;color:#64748b;letter-spacing:1px;margin-bottom:12px">
         OPERATIONS — <%= @product_group |> to_string() |> String.upcase() %>
@@ -720,7 +720,7 @@ defmodule TradingDesk.ContractsLive do
       </div>
     </div>
 
-    <%# Selected contract detail %>
+    <%!-- Selected contract detail --%>
     <%= if @selected_contract do %>
       <% c = @selected_contract %>
       <div style="background:#111827;border-radius:10px;padding:20px;margin-bottom:16px">
