@@ -16,6 +16,7 @@ defmodule AmmoniaDesk.ScenarioLive do
     - AGENT: Automated agent monitoring with delta-based triggering
   """
   use Phoenix.LiveView
+  require Logger
 
   alias AmmoniaDesk.Variables
   alias AmmoniaDesk.Solver.Port, as: Solver
@@ -305,9 +306,17 @@ defmodule AmmoniaDesk.ScenarioLive do
     vars = socket.assigns.current_vars
     lv_pid = self()
     spawn(fn ->
-      case AmmoniaDesk.Analyst.explain_solve(vars, result) do
-        {:ok, text} -> send(lv_pid, {:explanation_result, text})
-        _ -> send(lv_pid, {:explanation_result, nil})
+      try do
+        case AmmoniaDesk.Analyst.explain_solve(vars, result) do
+          {:ok, text} -> send(lv_pid, {:explanation_result, text})
+          {:error, reason} ->
+            Logger.warning("Analyst explain_solve failed: #{inspect(reason)}")
+            send(lv_pid, {:explanation_result, nil})
+        end
+      rescue
+        e ->
+          Logger.error("Analyst explain_solve crashed: #{Exception.message(e)}")
+          send(lv_pid, {:explanation_result, nil})
       end
     end)
     {:noreply, socket}
@@ -327,9 +336,17 @@ defmodule AmmoniaDesk.ScenarioLive do
     vars = socket.assigns.current_vars
     lv_pid = self()
     spawn(fn ->
-      case AmmoniaDesk.Analyst.explain_distribution(vars, dist) do
-        {:ok, text} -> send(lv_pid, {:explanation_result, text})
-        _ -> send(lv_pid, {:explanation_result, nil})
+      try do
+        case AmmoniaDesk.Analyst.explain_distribution(vars, dist) do
+          {:ok, text} -> send(lv_pid, {:explanation_result, text})
+          {:error, reason} ->
+            Logger.warning("Analyst explain_distribution failed: #{inspect(reason)}")
+            send(lv_pid, {:explanation_result, nil})
+        end
+      rescue
+        e ->
+          Logger.error("Analyst explain_distribution crashed: #{Exception.message(e)}")
+          send(lv_pid, {:explanation_result, nil})
       end
     end)
     {:noreply, socket}

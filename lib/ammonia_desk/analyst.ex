@@ -216,8 +216,11 @@ defmodule AmmoniaDesk.Analyst do
   end
 
   defp format_vessels(result, _frame) do
-    barges = result.barges || 0.0
-    if is_float(barges), do: Float.round(barges, 1), else: barges
+    case result.barges do
+      nil -> "N/A"
+      b when is_float(b) -> Float.round(b, 1)
+      b -> b
+    end
   end
 
   # ── Sensitivity & triggers ──────────────────────────────────
@@ -308,5 +311,6 @@ defmodule AmmoniaDesk.Analyst do
     |> String.trim_leading(",")
   end
 
+  defp format_number(nil), do: "N/A"
   defp format_number(val), do: to_string(val)
 end
