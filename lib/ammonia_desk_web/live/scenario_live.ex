@@ -68,6 +68,7 @@ defmodule AmmoniaDesk.ScenarioLive do
       |> assign(:available_groups, available_groups)
       |> assign(:solving, false)
       |> assign(:active_tab, :trader)
+      |> assign(:objective_mode, :max_profit)
       |> assign(:agent_history, [])
       |> assign(:explanation, nil)
       |> assign(:explaining, false)
@@ -229,6 +230,12 @@ defmodule AmmoniaDesk.ScenarioLive do
   end
 
   @impl true
+  def handle_event("switch_objective", %{"objective" => obj}, socket) do
+    objective = String.to_existing_atom(obj)
+    {:noreply, assign(socket, :objective_mode, objective)}
+  end
+
+  @impl true
   def handle_event("switch_tab", %{"tab" => tab}, socket) do
     tab_atom = String.to_existing_atom(tab)
     socket = assign(socket, :active_tab, tab_atom)
@@ -251,8 +258,9 @@ defmodule AmmoniaDesk.ScenarioLive do
   def handle_info(:do_solve, socket) do
     vars = socket.assigns.current_vars
     pg = socket.assigns.product_group
-    # Pipeline: check contracts → ingest changes → solve
-    Pipeline.solve_async(vars, product_group: pg, caller_ref: :trader_solve)
+    obj = socket.assigns.objective_mode
+    solver_opts = [objective: obj]
+    Pipeline.solve_async(vars, product_group: pg, caller_ref: :trader_solve, solver_opts: solver_opts)
     {:noreply, socket}
   end
 
@@ -260,8 +268,9 @@ defmodule AmmoniaDesk.ScenarioLive do
   def handle_info(:do_monte_carlo, socket) do
     vars = socket.assigns.current_vars
     pg = socket.assigns.product_group
-    # Pipeline: check contracts → ingest changes → monte carlo
-    Pipeline.monte_carlo_async(vars, product_group: pg, caller_ref: :trader_mc)
+    obj = socket.assigns.objective_mode
+    solver_opts = [objective: obj]
+    Pipeline.monte_carlo_async(vars, product_group: pg, caller_ref: :trader_mc, solver_opts: solver_opts)
     {:noreply, socket}
   end
 
@@ -363,22 +372,29 @@ defmodule AmmoniaDesk.ScenarioLive do
 
   @impl true
   def handle_info({:data_updated, _source}, socket) do
+    pg = socket.assigns.product_group
     live = LiveState.get()
 
-    # Update non-overridden variables in current_vars so sliders track live API values
-    overrides = socket.assigns.overrides
-    current = socket.assigns.current_vars
+    # Only merge live data for ammonia_domestic (which uses the Variables struct).
+    # Other product groups use frame defaults and manual overrides.
+    if pg == :ammonia_domestic do
+      overrides = socket.assigns.overrides
+      current = socket.assigns.current_vars
+      valid_keys = MapSet.new(ProductGroup.variable_keys(pg))
 
-    updated_current =
-      Enum.reduce(Map.from_struct(live), current, fn {key, val}, acc ->
-        if MapSet.member?(overrides, key) do
-          acc  # Keep trader's override
-        else
-          Map.put(acc, key, val)  # Track live value
-        end
-      end)
+      updated_current =
+        Enum.reduce(Map.from_struct(live), current, fn {key, val}, acc ->
+          if MapSet.member?(overrides, key) or not MapSet.member?(valid_keys, key) do
+            acc
+          else
+            Map.put(acc, key, val)
+          end
+        end)
 
-    {:noreply, assign(socket, live_vars: live, current_vars: updated_current)}
+      {:noreply, assign(socket, live_vars: live, current_vars: updated_current)}
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
@@ -503,6 +519,15 @@ defmodule AmmoniaDesk.ScenarioLive do
                 style="padding:10px;border:none;border-radius:6px;font-weight:700;font-size:12px;background:linear-gradient(135deg,#7c3aed,#8b5cf6);color:#fff;cursor:pointer;letter-spacing:1px">
                 <%= pipeline_button_text(@solving, @pipeline_phase, "MONTE CARLO") %>
               </button>
+            </div>
+            <div style="margin-top:8px">
+              <div style="font-size:10px;color:#64748b;letter-spacing:0.8px;margin-bottom:4px">OBJECTIVE</div>
+              <select phx-change="switch_objective" name="objective"
+                style="width:100%;background:#111827;border:1px solid #1e293b;color:#94a3b8;padding:6px 8px;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer">
+                <%= for {val, label} <- [max_profit: "Maximize Profit", min_cost: "Minimize Cost", max_roi: "Maximize ROI", cvar_adjusted: "CVaR-Adjusted", min_risk: "Minimize Risk"] do %>
+                  <option value={val} selected={val == @objective_mode}><%= label %></option>
+                <% end %>
+              </select>
             </div>
             <button phx-click="reset"
               style="width:100%;padding:7px;border:1px solid #1e293b;border-radius:6px;font-weight:600;font-size:11px;background:transparent;color:#64748b;cursor:pointer;margin-top:8px">
@@ -690,6 +715,90 @@ defmodule AmmoniaDesk.ScenarioLive do
               </div>
             <% end %>
 
+            <%# === ROUTE MAP === %>
+            <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+              <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700;margin-bottom:8px">ROUTE MAP</div>
+              <div id={"trader-map-#{@product_group}"} phx-hook="VesselMap" phx-update="ignore"
+                data-mapdata={map_data_json(@product_group, @frame, @result, @vessel_data)}
+                style="height:280px;border-radius:8px;background:#0a0f18"></div>
+            </div>
+
+            <%# === FLEET TRACKING (Trader tab) === %>
+            <%= if @vessel_data && @vessel_data[:vessels] && length(@vessel_data[:vessels]) > 0 do %>
+              <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                  <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700">FLEET TRACKING</div>
+                  <div style="font-size:10px;color:#475569">
+                    <%= if @vessel_data[:fleet_summary] do %>
+                      <%= @vessel_data[:fleet_summary][:total_vessels] %> vessels
+                      — <%= @vessel_data[:fleet_summary][:underway] || 0 %> underway
+                    <% end %>
+                  </div>
+                </div>
+                <table style="width:100%;border-collapse:collapse;font-size:11px">
+                  <thead><tr style="border-bottom:1px solid #1e293b">
+                    <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Vessel</th>
+                    <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Near</th>
+                    <th style="text-align:right;padding:4px 6px;color:#64748b;font-size:10px">Mile</th>
+                    <th style="text-align:right;padding:4px 6px;color:#64748b;font-size:10px">Speed</th>
+                    <th style="text-align:center;padding:4px 6px;color:#64748b;font-size:10px">Dir</th>
+                    <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Status</th>
+                  </tr></thead>
+                  <tbody>
+                    <%= for vessel <- @vessel_data[:vessels] do %>
+                      <tr style="border-bottom:1px solid #1e293b11">
+                        <td style="padding:5px 6px;font-weight:600;color:#e2e8f0;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= vessel[:name] || "Unknown" %></td>
+                        <td style="padding:5px 6px;color:#94a3b8"><%= vessel[:nearest_waypoint] || "—" %></td>
+                        <td style="text-align:right;padding:5px 6px;font-family:monospace;color:#38bdf8"><%= vessel[:river_mile] || "—" %></td>
+                        <td style="text-align:right;padding:5px 6px;font-family:monospace;color:#c8d6e5"><%= if vessel[:speed], do: "#{Float.round(vessel[:speed], 1)}kn", else: "—" %></td>
+                        <td style="text-align:center;padding:5px 6px"><%= vessel_status_icon(vessel[:direction]) %></td>
+                        <td style={"padding:5px 6px;color:#{vessel_status_color(vessel[:status])};font-size:10px;font-weight:600"}><%= vessel_status_text(vessel[:status]) %></td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              </div>
+            <% end %>
+
+            <%# === TIDES & CURRENTS (Trader tab) === %>
+            <%= if @tides_data do %>
+              <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+                <div style="font-size:10px;color:#818cf8;letter-spacing:1px;font-weight:700;margin-bottom:10px">TIDES & CURRENTS</div>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">
+                  <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                    <div style="font-size:9px;color:#64748b">Water Level</div>
+                    <div style="font-size:16px;font-weight:700;color:#60a5fa;font-family:monospace">
+                      <%= if @tides_data[:water_level_ft], do: "#{Float.round(@tides_data[:water_level_ft], 1)}ft", else: "—" %>
+                    </div>
+                  </div>
+                  <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                    <div style="font-size:9px;color:#64748b">Tidal Range</div>
+                    <div style="font-size:16px;font-weight:700;color:#818cf8;font-family:monospace">
+                      <%= if @tides_data[:tidal_range_ft], do: "#{Float.round(@tides_data[:tidal_range_ft], 1)}ft", else: "—" %>
+                    </div>
+                  </div>
+                  <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                    <div style="font-size:9px;color:#64748b">Current</div>
+                    <div style="font-size:16px;font-weight:700;color:#38bdf8;font-family:monospace">
+                      <%= if @tides_data[:current_speed_kn], do: "#{Float.round(@tides_data[:current_speed_kn], 1)}kn", else: "—" %>
+                    </div>
+                  </div>
+                </div>
+                <%= if @tides_data[:tidal_predictions] && @tides_data[:tidal_predictions][:next_high] do %>
+                  <div style="font-size:10px;color:#475569;margin-top:4px">
+                    Next high: <span style="color:#94a3b8"><%= @tides_data[:tidal_predictions][:next_high][:time] %></span>
+                    (<span style="color:#60a5fa"><%= Float.round(@tides_data[:tidal_predictions][:next_high][:level], 1) %>ft</span>)
+                  </div>
+                <% end %>
+                <%= if @tides_data[:tidal_predictions] && @tides_data[:tidal_predictions][:next_low] do %>
+                  <div style="font-size:10px;color:#475569">
+                    Next low: <span style="color:#94a3b8"><%= @tides_data[:tidal_predictions][:next_low][:time] %></span>
+                    (<span style="color:#f59e0b"><%= Float.round(@tides_data[:tidal_predictions][:next_low][:level], 1) %>ft</span>)
+                  </div>
+                <% end %>
+              </div>
+            <% end %>
+
             <%# Saved scenarios %>
             <%= if length(@saved_scenarios) > 0 do %>
               <div style="background:#111827;border-radius:10px;padding:16px">
@@ -824,6 +933,14 @@ defmodule AmmoniaDesk.ScenarioLive do
                   <% end %>
                 </div>
               <% end %>
+
+              <%# === AGENT ROUTE MAP === %>
+              <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+                <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700;margin-bottom:8px">ROUTE MAP</div>
+                <div id={"agent-map-#{@product_group}"} phx-hook="VesselMap" phx-update="ignore"
+                  data-mapdata={map_data_json(@product_group, @frame, nil, @vessel_data)}
+                  style="height:280px;border-radius:8px;background:#0a0f18"></div>
+              </div>
 
               <%# === FLEET TRACKING === %>
               <%= if @vessel_data && @vessel_data[:vessels] && length(@vessel_data[:vessels]) > 0 do %>
@@ -1122,4 +1239,135 @@ defmodule AmmoniaDesk.ScenarioLive do
   defp vessel_status_text(:not_under_command), do: "NUC"
   defp vessel_status_text(:restricted_maneuverability), do: "RESTRICTED"
   defp vessel_status_text(_), do: "UNKNOWN"
+
+  # --- Map data helpers ---
+
+  @terminal_coords %{
+    # Ammonia Domestic (Mississippi River)
+    "Donaldsonville, LA" => {30.098, -90.993},
+    "Geismar, LA" => {30.219, -90.935},
+    "St. Louis, MO" => {38.627, -90.199},
+    "Memphis, TN" => {35.150, -90.049},
+    # Ammonia International
+    "Point Lisas, Trinidad" => {10.400, -61.468},
+    "Yuzhnyy, Ukraine" => {46.627, 31.011},
+    "Jubail, Saudi Arabia" => {27.015, 49.658},
+    "Tampa, FL" => {27.951, -82.457},
+    "Paradip/Mumbai, India" => {20.266, 86.612},
+    "Jorf Lasfar, Morocco" => {33.101, -8.621},
+    # Sulphur International
+    "Vancouver, BC" => {49.283, -123.121},
+    "Abu Dhabi/Ruwais, UAE" => {24.073, 52.730},
+    "Batumi, Georgia" => {41.640, 41.637},
+    "Mumbai/Paradip, India" => {20.266, 86.612},
+    "Nanjing/Zhanjiang, China" => {32.060, 118.797},
+    # Petcoke
+    "US Gulf Coast" => {29.760, -95.370},
+    "Mundra/Kandla, India" => {22.739, 69.722},
+    "Qingdao/Lianyungang, China" => {36.067, 120.383},
+    "Mundra/Jamnagar, India" => {22.294, 68.968}
+  }
+
+  @map_centers %{
+    ammonia_domestic: {34.0, -90.5, 5},
+    ammonia_international: {20.0, -20.0, 2},
+    sulphur_international: {25.0, 40.0, 2},
+    petcoke: {20.0, 40.0, 2}
+  }
+
+  defp map_data_json(product_group, frame, result, vessel_data) do
+    routes = frame[:routes] || []
+    {clat, clon, zoom} = Map.get(@map_centers, product_group, {20.0, 0.0, 2})
+
+    route_tons = if result, do: result.route_tons || [], else: []
+
+    terminals =
+      routes
+      |> Enum.flat_map(fn r -> [r[:origin], r[:destination]] end)
+      |> Enum.uniq()
+      |> Enum.flat_map(fn name ->
+        case Map.get(@terminal_coords, name) do
+          {lat, lon} ->
+            color = if String.contains?(name || "", ["Don", "Geis", "USGC", "US Gulf", "Vancouver", "Point Lisas",
+                                                      "Yuzhnyy", "Jubail", "Abu Dhabi", "Batumi", "Mundra/Jamnagar"]),
+                       do: "#f59e0b", else: "#10b981"
+            [%{name: name, lat: lat, lon: lon, color: color}]
+          _ -> []
+        end
+      end)
+
+    route_lines =
+      routes
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {r, idx} ->
+        with {flat, flon} <- Map.get(@terminal_coords, r[:origin]),
+             {tlat, tlon} <- Map.get(@terminal_coords, r[:destination]) do
+          tons = Enum.at(route_tons, idx, 0.0)
+          [%{from_lat: flat, from_lon: flon, to_lat: tlat, to_lon: tlon, active: tons > 0.5}]
+        else
+          _ -> []
+        end
+      end)
+
+    vessels =
+      case vessel_data do
+        %{vessels: vs} when is_list(vs) -> build_vessel_markers(vs, product_group)
+        _ when is_map(vessel_data) ->
+          case vessel_data[:vessels] do
+            vs when is_list(vs) -> build_vessel_markers(vs, product_group)
+            _ -> []
+          end
+        _ -> []
+      end
+
+    data = %{
+      center: [clat, clon],
+      zoom: zoom,
+      terminals: terminals,
+      routes: route_lines,
+      vessels: vessels
+    }
+
+    Jason.encode!(data)
+  end
+
+  defp build_vessel_markers(vessels, :ammonia_domestic) do
+    # Barge positions approximated from river mile on the Mississippi
+    Enum.flat_map(vessels, fn v ->
+      case v[:river_mile] do
+        rm when is_number(rm) ->
+          # Approximate lat from river mile (Mile 0 = Pilottown ~29.18, Mile 180 = NOLA ~30.0,
+          # Mile 600 = Memphis ~35.15, Mile 1050 = St. Louis ~38.63)
+          lat = 29.18 + rm * 0.009
+          lon = -90.0 + :rand.uniform() * 0.3 - 0.15  # slight jitter
+          color = case v[:status] do
+            :underway_engine -> "#10b981"
+            :at_anchor -> "#f59e0b"
+            :moored -> "#60a5fa"
+            _ -> "#64748b"
+          end
+          [%{lat: lat, lon: lon, name: v[:name] || "Barge", status: to_string(v[:status] || "unknown"), color: color}]
+        _ -> []
+      end
+    end)
+  end
+
+  defp build_vessel_markers(vessels, _product_group) do
+    # Ocean vessels with lat/lon
+    Enum.flat_map(vessels, fn v ->
+      lat = v[:latitude] || v[:lat]
+      lon = v[:longitude] || v[:lon]
+      if lat && lon do
+        color = case v[:status] do
+          :underway_engine -> "#10b981"
+          :at_anchor -> "#f59e0b"
+          :moored -> "#60a5fa"
+          _ -> "#64748b"
+        end
+        [%{lat: lat, lon: lon, name: v[:name] || "Vessel", status: to_string(v[:status] || "unknown"), color: color}]
+      else
+        []
+      end
+    end)
+  end
 end

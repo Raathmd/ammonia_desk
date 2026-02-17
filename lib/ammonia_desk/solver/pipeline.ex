@@ -76,6 +76,7 @@ defmodule AmmoniaDesk.Solver.Pipeline do
     caller_ref = Keyword.get(opts, :caller_ref)
     trader_id = Keyword.get(opts, :trader_id)
     trigger = Keyword.get(opts, :trigger, :dashboard)
+    solver_opts = Keyword.get(opts, :solver_opts, [])
 
     run_id = generate_run_id()
     started_at = DateTime.utc_now()
@@ -129,7 +130,7 @@ defmodule AmmoniaDesk.Solver.Pipeline do
         })
 
         audit = %{audit | solve_started_at: DateTime.utc_now()}
-        solve_result = execute_solve(variables, product_group, mode, n_scenarios)
+        solve_result = execute_solve(variables, product_group, mode, n_scenarios, solver_opts)
 
         case solve_result do
           {:ok, result} ->
@@ -193,7 +194,7 @@ defmodule AmmoniaDesk.Solver.Pipeline do
         })
 
         audit = %{audit | solve_started_at: DateTime.utc_now()}
-        solve_result = execute_solve(variables, product_group, mode, n_scenarios)
+        solve_result = execute_solve(variables, product_group, mode, n_scenarios, solver_opts)
 
         case solve_result do
           {:ok, result} ->
@@ -348,20 +349,20 @@ defmodule AmmoniaDesk.Solver.Pipeline do
   # PHASE 2: EXECUTE SOLVE
   # ──────────────────────────────────────────────────────────
 
-  defp execute_solve(%AmmoniaDesk.Variables{} = variables, _product_group, :solve, _n_scenarios) do
+  defp execute_solve(%AmmoniaDesk.Variables{} = variables, _product_group, :solve, _n_scenarios, _solver_opts) do
     Port.solve(variables)
   end
 
-  defp execute_solve(%AmmoniaDesk.Variables{} = variables, _product_group, :monte_carlo, n_scenarios) do
+  defp execute_solve(%AmmoniaDesk.Variables{} = variables, _product_group, :monte_carlo, n_scenarios, _solver_opts) do
     Port.monte_carlo(variables, n_scenarios)
   end
 
-  defp execute_solve(variables, product_group, :solve, _n_scenarios) when is_map(variables) do
-    Port.solve(product_group, variables)
+  defp execute_solve(variables, product_group, :solve, _n_scenarios, solver_opts) when is_map(variables) do
+    Port.solve(product_group, variables, solver_opts)
   end
 
-  defp execute_solve(variables, product_group, :monte_carlo, n_scenarios) when is_map(variables) do
-    Port.monte_carlo(product_group, variables, n_scenarios)
+  defp execute_solve(variables, product_group, :monte_carlo, n_scenarios, solver_opts) when is_map(variables) do
+    Port.monte_carlo(product_group, variables, n_scenarios, solver_opts)
   end
 
   # ──────────────────────────────────────────────────────────
