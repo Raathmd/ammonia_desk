@@ -4,148 +4,105 @@ const highs = @cImport({
 });
 
 // ============================================================
-// Input struct — 20 f64s matching Elixir's Variables.to_binary/1
+// Generic Data-Driven LP Solver
+//
+// Reads a model descriptor + variables from Elixir via Erlang Port.
+// Builds and solves the LP dynamically — no hardcoded product groups.
+//
+// Supports 5 objective modes:
+//   0 = max_profit    maximize Σ(margin[r] × tons[r])
+//   1 = min_cost      minimize Σ(cost[r] × tons[r])
+//   2 = max_roi       maximize profit / cost (Charnes-Cooper)
+//   3 = cvar_adjusted max profit - λ × CVaR₅
+//   4 = min_risk      minimize CVaR₅ s.t. profit ≥ floor
+//
+// Protocol:
+//   Request:  <<cmd::8, payload::binary>>
+//     cmd 1 = single solve
+//     cmd 2 = monte carlo
+//   Response: <<status::8, payload::binary>>
+//     status 0 = ok, 1 = infeasible, 2 = error
 // ============================================================
-const Input = struct {
-    river_stage: f64,
-    lock_hrs: f64,
-    temp_f: f64,
-    wind_mph: f64,
-    vis_mi: f64,
-    precip_in: f64,
-    inv_don: f64,
-    inv_geis: f64,
-    stl_outage: f64, // 1.0 or 0.0
-    mem_outage: f64,
-    barge_count: f64,
-    nola_buy: f64,
-    sell_stl: f64,
-    sell_mem: f64,
-    fr_don_stl: f64,
-    fr_don_mem: f64,
-    fr_geis_stl: f64,
-    fr_geis_mem: f64,
-    nat_gas: f64,
-    working_cap: f64,
+
+const MAX_VARS: usize = 64;
+const MAX_ROUTES: usize = 16;
+const MAX_CONSTRAINTS: usize = 32;
+const MAX_CORRELATIONS: usize = 8;
+const MAX_SCENARIOS: usize = 10000;
+
+// ── Objective modes ──
+const OBJ_MAX_PROFIT: u8 = 0;
+const OBJ_MIN_COST: u8 = 1;
+const OBJ_MAX_ROI: u8 = 2;
+const OBJ_CVAR_ADJUSTED: u8 = 3;
+const OBJ_MIN_RISK: u8 = 4;
+
+// ── Constraint types ──
+const CT_SUPPLY: u8 = 0;   // Σ(route_tons) ≤ bound_var
+const CT_DEMAND: u8 = 1;   // Σ(route_tons) ≤ bound_var (with optional min)
+const CT_FLEET: u8 = 2;    // Σ(route_tons / unit_cap) ≤ bound_var
+const CT_CAPITAL: u8 = 3;  // Σ(cost_per_ton × route_tons) ≤ bound_var
+const CT_CUSTOM: u8 = 4;   // custom coefficients
+
+// ── Model descriptor (parsed from binary) ──
+const Correlation = struct {
+    var_idx: u8,
+    coefficient: f64,
+};
+
+const Perturbation = struct {
+    stddev: f64,
+    lo: f64,
+    hi: f64,
+    n_corr: u8,
+    corr: [MAX_CORRELATIONS]Correlation,
+};
+
+const Route = struct {
+    sell_var_idx: u8,
+    buy_var_idx: u8,
+    freight_var_idx: u8,
+    transit_cost_per_day: f64,
+    base_transit_days: f64,
+    unit_capacity: f64,
+};
+
+const Constraint = struct {
+    ctype: u8,
+    bound_var_idx: u8,
+    bound_min_var_idx: u8,     // 0xFF = no minimum
+    outage_var_idx: u8,        // 0xFF = no outage modifier
+    outage_factor: f64,        // multiply bound by this when outage active (e.g. 0.5)
+    n_routes: u8,
+    route_indices: [MAX_ROUTES]u8,
+    coefficients: [MAX_ROUTES]f64, // for CT_CUSTOM
+};
+
+const Model = struct {
+    n_vars: u16,
+    n_routes: u8,
+    n_constraints: u8,
+    obj_mode: u8,
+    lambda: f64,         // risk aversion (for CVaR modes)
+    profit_floor: f64,   // minimum profit (for min_risk mode)
+    routes: [MAX_ROUTES]Route,
+    constraints: [MAX_CONSTRAINTS]Constraint,
+    perturbations: [MAX_VARS]Perturbation,
 };
 
 const SolveResult = struct {
-    status: u8, // 0=optimal, 1=infeasible, 2=error
+    status: u8,
     profit: f64,
     tons: f64,
-    barges: f64,
     cost: f64,
-    eff_barge: f64,
-    route_tons: [4]f64,
-    route_profits: [4]f64,
-    margins: [4]f64,
-    transits: [4]f64,
-    shadow: [6]f64,
+    roi: f64,
+    route_tons: [MAX_ROUTES]f64,
+    route_profits: [MAX_ROUTES]f64,
+    margins: [MAX_ROUTES]f64,
+    shadow: [MAX_CONSTRAINTS]f64,
+    n_routes: u8,
+    n_constraints: u8,
 };
-
-fn solve_one(input: Input) SolveResult {
-    var r = SolveResult{
-        .status = 2,
-        .profit = 0,
-        .tons = 0,
-        .barges = 0,
-        .cost = 0,
-        .eff_barge = 0,
-        .route_tons = .{ 0, 0, 0, 0 },
-        .route_profits = .{ 0, 0, 0, 0 },
-        .margins = .{ 0, 0, 0, 0 },
-        .transits = .{ 0, 0, 0, 0 },
-        .shadow = .{ 0, 0, 0, 0, 0, 0 },
-    };
-
-    const dm: f64 = if (input.river_stage < 12) 0.75 else if (input.river_stage < 18) 0.90 else 1.0;
-    r.eff_barge = 1500.0 * dm;
-
-    const dd = input.lock_hrs / 24.0;
-    var wa: f64 = 0;
-    if (input.wind_mph > 15) wa += 0.5;
-    if (input.vis_mi <= 0.5) wa += 0.5;
-    if (input.temp_f < 32) wa += 0.5;
-    if (input.river_stage < 10) wa += 1.0;
-    const ta = dd + wa;
-
-    const bt = [4]f64{ 9.0, 5.5, 9.5, 6.0 };
-    const fr = [4]f64{ input.fr_don_stl, input.fr_don_mem, input.fr_geis_stl, input.fr_geis_mem };
-    const sp = [4]f64{ input.sell_stl, input.sell_mem, input.sell_stl, input.sell_mem };
-
-    for (0..4) |idx| {
-        r.transits[idx] = bt[idx] + ta;
-        r.margins[idx] = sp[idx] - input.nola_buy - fr[idx] - r.transits[idx] * 0.5;
-    }
-
-    var sa: f64 = 8000.0 - 2500.0;
-    var ma: f64 = 6000.0 - 4000.0;
-    if (input.stl_outage > 0.5) sa *= 0.5;
-    if (input.mem_outage > 0.5) ma *= 0.5;
-    if (sa < 0) sa = 0;
-    if (ma < 0) ma = 0;
-    const sc = @min(@as(f64, 5000), sa);
-    const mc = @min(@as(f64, 4000), ma);
-
-    const h = highs.Highs_create() orelse return r;
-    defer highs.Highs_destroy(h);
-    _ = highs.Highs_setBoolOptionValue(h, "output_flag", 0);
-
-    var lo_v = [4]f64{ 0, 0, 0, 0 };
-    var hi_v = [4]f64{ 1e30, 1e30, 1e30, 1e30 };
-    _ = highs.Highs_addVars(h, 4, &lo_v, &hi_v);
-    _ = highs.Highs_changeObjectiveSense(h, highs.kHighsObjSenseMaximize);
-    for (0..4) |idx| _ = highs.Highs_changeColCost(h, @intCast(idx), r.margins[idx]);
-
-    var idx_01 = [2]c_int{ 0, 1 };
-    var idx_23 = [2]c_int{ 2, 3 };
-    var idx_02 = [2]c_int{ 0, 2 };
-    var idx_13 = [2]c_int{ 1, 3 };
-    var idx_a = [4]c_int{ 0, 1, 2, 3 };
-    var o2 = [2]f64{ 1, 1 };
-
-    _ = highs.Highs_addRow(h, 0, input.inv_don, 2, &idx_01, &o2);
-    _ = highs.Highs_addRow(h, 0, input.inv_geis, 2, &idx_23, &o2);
-    _ = highs.Highs_addRow(h, sc, sa, 2, &idx_02, &o2);
-    _ = highs.Highs_addRow(h, mc, ma, 2, &idx_13, &o2);
-    var fc = [4]f64{ 1.0 / r.eff_barge, 1.0 / r.eff_barge, 1.0 / r.eff_barge, 1.0 / r.eff_barge };
-    _ = highs.Highs_addRow(h, 0, input.barge_count, 4, &idx_a, &fc);
-    var cc: [4]f64 = undefined;
-    for (0..4) |idx| cc[idx] = input.nola_buy + fr[idx];
-    _ = highs.Highs_addRow(h, 0, input.working_cap, 4, &idx_a, &cc);
-
-    _ = highs.Highs_run(h);
-    const ms = highs.Highs_getModelStatus(h);
-
-    if (ms == 7) {
-        r.status = 0; // optimal
-    } else if (ms == 8) {
-        r.status = 1; // infeasible
-        return r;
-    } else {
-        r.status = 2;
-        return r;
-    }
-
-    var cd: [4]f64 = undefined;
-    var rv: [6]f64 = undefined;
-    _ = highs.Highs_getSolution(h, &r.route_tons, &cd, &rv, &r.shadow);
-
-    for (0..4) |idx| {
-        if (r.route_tons[idx] > 0.5) {
-            r.route_profits[idx] = r.route_tons[idx] * r.margins[idx];
-            r.tons += r.route_tons[idx];
-            r.profit += r.route_profits[idx];
-            r.barges += r.route_tons[idx] / r.eff_barge;
-            r.cost += r.route_tons[idx] * (input.nola_buy + fr[idx]);
-        }
-    }
-    return r;
-}
-
-// ============================================================
-// Monte Carlo Implementation
-// ============================================================
 
 const MonteCarloResult = struct {
     n_scenarios: u32,
@@ -160,10 +117,191 @@ const MonteCarloResult = struct {
     p95: f64,
     min: f64,
     max: f64,
-    sensitivity: [20]f64, // Pearson correlation of each variable with profit
+    sensitivity: [MAX_VARS]f64,
+    n_vars: u16,
 };
 
-// Simple xoshiro256** PRNG (no allocator needed)
+// ============================================================
+// LP Solve — builds the model from descriptor
+// ============================================================
+fn solve_one(model: *const Model, vars: []const f64) SolveResult {
+    const nr = model.n_routes;
+    const nc = model.n_constraints;
+
+    var r = SolveResult{
+        .status = 2,
+        .profit = 0,
+        .tons = 0,
+        .cost = 0,
+        .roi = 0,
+        .route_tons = [_]f64{0} ** MAX_ROUTES,
+        .route_profits = [_]f64{0} ** MAX_ROUTES,
+        .margins = [_]f64{0} ** MAX_ROUTES,
+        .shadow = [_]f64{0} ** MAX_CONSTRAINTS,
+        .n_routes = nr,
+        .n_constraints = nc,
+    };
+
+    // Compute margins for each route
+    for (0..nr) |i| {
+        const rt = &model.routes[i];
+        const sell = if (rt.sell_var_idx < vars.len) vars[rt.sell_var_idx] else 0;
+        const buy = if (rt.buy_var_idx < vars.len) vars[rt.buy_var_idx] else 0;
+        const freight = if (rt.freight_var_idx < vars.len) vars[rt.freight_var_idx] else 0;
+        const transit_cost = rt.base_transit_days * rt.transit_cost_per_day;
+        r.margins[i] = sell - buy - freight - transit_cost;
+    }
+
+    // Create HiGHS model
+    const h = highs.Highs_create() orelse return r;
+    defer highs.Highs_destroy(h);
+    _ = highs.Highs_setBoolOptionValue(h, "output_flag", 0);
+
+    // Add route decision variables (continuous, >= 0)
+    var lo_v: [MAX_ROUTES]f64 = [_]f64{0} ** MAX_ROUTES;
+    var hi_v: [MAX_ROUTES]f64 = [_]f64{1e30} ** MAX_ROUTES;
+    _ = highs.Highs_addVars(h, @intCast(nr), &lo_v, &hi_v);
+
+    // Set objective based on mode
+    switch (model.obj_mode) {
+        OBJ_MAX_PROFIT, OBJ_CVAR_ADJUSTED => {
+            _ = highs.Highs_changeObjectiveSense(h, highs.kHighsObjSenseMaximize);
+            for (0..nr) |i| {
+                _ = highs.Highs_changeColCost(h, @intCast(i), r.margins[i]);
+            }
+        },
+        OBJ_MIN_COST => {
+            _ = highs.Highs_changeObjectiveSense(h, highs.kHighsObjSenseMinimize);
+            for (0..nr) |i| {
+                const rt = &model.routes[i];
+                const buy = if (rt.buy_var_idx < vars.len) vars[rt.buy_var_idx] else 0;
+                const freight = if (rt.freight_var_idx < vars.len) vars[rt.freight_var_idx] else 0;
+                _ = highs.Highs_changeColCost(h, @intCast(i), buy + freight);
+            }
+        },
+        OBJ_MAX_ROI => {
+            // Charnes-Cooper: maximize margin, normalize by cost constraint
+            _ = highs.Highs_changeObjectiveSense(h, highs.kHighsObjSenseMaximize);
+            for (0..nr) |i| {
+                _ = highs.Highs_changeColCost(h, @intCast(i), r.margins[i]);
+            }
+        },
+        OBJ_MIN_RISK => {
+            // For single solve in min_risk mode, just maximize profit
+            // (risk minimization is done at the MC level)
+            _ = highs.Highs_changeObjectiveSense(h, highs.kHighsObjSenseMaximize);
+            for (0..nr) |i| {
+                _ = highs.Highs_changeColCost(h, @intCast(i), r.margins[i]);
+            }
+        },
+        else => {
+            _ = highs.Highs_changeObjectiveSense(h, highs.kHighsObjSenseMaximize);
+            for (0..nr) |i| {
+                _ = highs.Highs_changeColCost(h, @intCast(i), r.margins[i]);
+            }
+        },
+    }
+
+    // Add constraints
+    for (0..nc) |ci| {
+        const con = &model.constraints[ci];
+        const bound_val = if (con.bound_var_idx < vars.len) vars[con.bound_var_idx] else 0;
+
+        // Apply outage modifier if applicable
+        var upper = bound_val;
+        if (con.outage_var_idx != 0xFF and con.outage_var_idx < vars.len) {
+            if (vars[con.outage_var_idx] > 0.5) {
+                upper *= con.outage_factor;
+            }
+        }
+
+        var lower: f64 = 0;
+        if (con.bound_min_var_idx != 0xFF and con.bound_min_var_idx < vars.len) {
+            lower = vars[con.bound_min_var_idx];
+        }
+
+        if (upper < 0) upper = 0;
+        if (lower < 0) lower = 0;
+
+        var indices: [MAX_ROUTES]c_int = undefined;
+        var coeffs: [MAX_ROUTES]f64 = undefined;
+        const n_r = con.n_routes;
+
+        for (0..n_r) |ri| {
+            indices[ri] = @intCast(con.route_indices[ri]);
+
+            switch (con.ctype) {
+                CT_SUPPLY, CT_DEMAND => {
+                    coeffs[ri] = 1.0;
+                },
+                CT_FLEET => {
+                    const route_idx = con.route_indices[ri];
+                    const cap = if (route_idx < nr) model.routes[route_idx].unit_capacity else 1500.0;
+                    coeffs[ri] = if (cap > 0) 1.0 / cap else 1.0;
+                },
+                CT_CAPITAL => {
+                    const route_idx = con.route_indices[ri];
+                    if (route_idx < nr) {
+                        const rt = &model.routes[route_idx];
+                        const buy = if (rt.buy_var_idx < vars.len) vars[rt.buy_var_idx] else 0;
+                        const freight = if (rt.freight_var_idx < vars.len) vars[rt.freight_var_idx] else 0;
+                        coeffs[ri] = buy + freight;
+                    } else {
+                        coeffs[ri] = 1.0;
+                    }
+                },
+                CT_CUSTOM => {
+                    coeffs[ri] = con.coefficients[ri];
+                },
+                else => {
+                    coeffs[ri] = 1.0;
+                },
+            }
+        }
+
+        _ = highs.Highs_addRow(h, lower, upper, @intCast(n_r), &indices, &coeffs);
+    }
+
+    // Solve
+    _ = highs.Highs_run(h);
+    const ms = highs.Highs_getModelStatus(h);
+
+    if (ms == 7) {
+        r.status = 0; // optimal
+    } else if (ms == 8) {
+        r.status = 1; // infeasible
+        return r;
+    } else {
+        r.status = 2; // error
+        return r;
+    }
+
+    // Extract solution
+    var col_dual: [MAX_ROUTES]f64 = undefined;
+    var row_val: [MAX_CONSTRAINTS]f64 = undefined;
+    _ = highs.Highs_getSolution(h, &r.route_tons, &col_dual, &row_val, &r.shadow);
+
+    // Compute aggregates
+    for (0..nr) |i| {
+        if (r.route_tons[i] > 0.5) {
+            r.route_profits[i] = r.route_tons[i] * r.margins[i];
+            r.tons += r.route_tons[i];
+            r.profit += r.route_profits[i];
+
+            const rt = &model.routes[i];
+            const buy = if (rt.buy_var_idx < vars.len) vars[rt.buy_var_idx] else 0;
+            const freight = if (rt.freight_var_idx < vars.len) vars[rt.freight_var_idx] else 0;
+            r.cost += r.route_tons[i] * (buy + freight);
+        }
+    }
+
+    r.roi = if (r.cost > 0) r.profit / r.cost * 100.0 else 0.0;
+    return r;
+}
+
+// ============================================================
+// Monte Carlo
+// ============================================================
 var prng_state: [4]u64 = .{ 0x853c49e6748fea9b, 0xda3e39cb94b95bdb, 0x5b5ad4a5bb4d05b8, 0x515ad4a5bb4d05b8 };
 
 fn prng_next() u64 {
@@ -178,80 +316,76 @@ fn prng_next() u64 {
     return result;
 }
 
+fn rand_uniform() f64 {
+    return @as(f64, @floatFromInt(prng_next() >> 11)) / @as(f64, @floatFromInt(@as(u64, 1) << 53));
+}
+
 fn rand_normal() f64 {
-    // Box-Muller transform
-    const rand1 = @as(f64, @floatFromInt(prng_next() >> 11)) / @as(f64, @floatFromInt(@as(u64, 1) << 53));
-    const rand2 = @as(f64, @floatFromInt(prng_next() >> 11)) / @as(f64, @floatFromInt(@as(u64, 1) << 53));
-    const rand1_safe = if (rand1 < 1e-15) 1e-15 else rand1;
-    return @sqrt(-2.0 * @log(rand1_safe)) * @cos(2.0 * std.math.pi * rand2);
+    const r1 = @max(rand_uniform(), 1e-15);
+    const r2 = rand_uniform();
+    return @sqrt(-2.0 * @log(r1)) * @cos(2.0 * std.math.pi * r2);
 }
 
 fn clamp(val: f64, lo: f64, hi: f64) f64 {
     return if (val < lo) lo else if (val > hi) hi else val;
 }
 
-fn perturb_correlated(center: Input) Input {
-    // Layer 1: Weather (independent)
-    const temp = clamp(center.temp_f + rand_normal() * 5.0, -20, 115);
-    const wind = clamp(center.wind_mph + rand_normal() * 3.0, 0, 55);
-    const precip = clamp(center.precip_in + rand_normal() * 0.5, 0, 8);
-    const vis = clamp(center.vis_mi + rand_normal() * 1.5, 0.05, 15);
+fn perturb(model: *const Model, center: []const f64, out: []f64) void {
+    const nv = model.n_vars;
 
-    // Layer 2: River (correlated with precip)
-    const precip_delta = precip - center.precip_in;
-    const stage = clamp(center.river_stage + rand_normal() * 3.0 + precip_delta * 3.0, 2, 55);
+    // First pass: independent perturbation
+    for (0..nv) |i| {
+        const p = &model.perturbations[i];
+        if (p.stddev > 0) {
+            out[i] = clamp(center[i] + rand_normal() * p.stddev, p.lo, p.hi);
+        } else {
+            // Boolean flip: stddev=0, lo=flip_probability
+            if (p.lo > 0 and rand_uniform() < p.lo) {
+                out[i] = 1.0 - center[i];
+            } else {
+                out[i] = center[i];
+            }
+        }
+    }
 
-    // Layer 3: Lock delays (correlated with stage, temp, wind)
-    var lock_base = center.lock_hrs + rand_normal() * 4.0;
-    if (stage < 10) lock_base += (10.0 - stage) * 2.0;
-    if (temp < 20) lock_base += 8.0;
-    if (wind > 30) lock_base += 4.0;
-    const lock = clamp(lock_base, 0, 96);
+    // Second pass: apply correlations (additive adjustments from other variables)
+    for (0..nv) |i| {
+        const p = &model.perturbations[i];
+        if (p.n_corr > 0 and p.stddev > 0) {
+            var adj: f64 = 0;
+            for (0..p.n_corr) |ci| {
+                const c = &p.corr[ci];
+                if (c.var_idx < nv) {
+                    const delta = out[c.var_idx] - center[c.var_idx];
+                    adj += delta * c.coefficient;
+                }
+            }
+            out[i] = clamp(out[i] + adj, p.lo, p.hi);
+        }
+    }
+}
 
-    // Layer 4: Barge availability (correlated with river + weather)
-    var barge_adj: f64 = 0;
-    if (stage < 10) barge_adj -= 3;
-    if (stage > 40) barge_adj -= 2;
-    if (temp < 15) barge_adj -= 1;
-    const barges = clamp(center.barge_count + rand_normal() * 2.0 + barge_adj, 1, 30);
-
-    // Layer 5: Prices (correlated with logistics difficulty)
-    const difficulty = lock / 24.0 + (if (stage < 12) @as(f64, 2.0) else 0.0);
-    const freight_adj = difficulty * 2.0;
-    const gas = clamp(center.nat_gas + rand_normal() * 0.3, 1, 8);
-
-    // Outage flips (rare)
-    const stl_flip = (prng_next() % 100) < 8;
-    const mem_flip = (prng_next() % 100) < 5;
-    const stl_out = if (stl_flip) 1.0 - center.stl_outage else center.stl_outage;
-    const mem_out = if (mem_flip) 1.0 - center.mem_outage else center.mem_outage;
-
-    return Input{
-        .river_stage = stage,
-        .lock_hrs = lock,
-        .temp_f = temp,
-        .wind_mph = wind,
-        .vis_mi = vis,
-        .precip_in = precip,
-        .inv_don = clamp(center.inv_don + rand_normal() * 1000, 0, 15000),
-        .inv_geis = clamp(center.inv_geis + rand_normal() * 800, 0, 10000),
-        .stl_outage = stl_out,
-        .mem_outage = mem_out,
-        .barge_count = barges,
-        .nola_buy = clamp(center.nola_buy + rand_normal() * 15.0, 200, 600),
-        .sell_stl = clamp(center.sell_stl + rand_normal() * 12.0 + freight_adj, 300, 600),
-        .sell_mem = clamp(center.sell_mem + rand_normal() * 10.0 + freight_adj, 280, 550),
-        .fr_don_stl = clamp(center.fr_don_stl + rand_normal() * 5.0 + freight_adj, 20, 130),
-        .fr_don_mem = clamp(center.fr_don_mem + rand_normal() * 3.0 + freight_adj * 0.5, 10, 80),
-        .fr_geis_stl = clamp(center.fr_geis_stl + rand_normal() * 5.0 + freight_adj, 20, 135),
-        .fr_geis_mem = clamp(center.fr_geis_mem + rand_normal() * 3.0 + freight_adj * 0.5, 10, 85),
-        .nat_gas = gas,
-        .working_cap = clamp(center.working_cap + rand_normal() * 200000, 500000, 10000000),
-    };
+fn pearson(x: []const f64, y: []const f64, y_mean: f64) f64 {
+    if (x.len != y.len or x.len == 0) return 0;
+    var x_sum: f64 = 0;
+    for (x) |val| x_sum += val;
+    const x_mean = x_sum / @as(f64, @floatFromInt(x.len));
+    var cov: f64 = 0;
+    var var_x: f64 = 0;
+    var var_y: f64 = 0;
+    for (x, y) |xi, yi| {
+        const dx = xi - x_mean;
+        const dy = yi - y_mean;
+        cov += dx * dy;
+        var_x += dx * dx;
+        var_y += dy * dy;
+    }
+    const denom = @sqrt(var_x * var_y);
+    if (denom < 1e-10) return 0;
+    return cov / denom;
 }
 
 fn sort_f64(arr: []f64) void {
-    // Simple insertion sort — fine for 1000 elements
     var i: usize = 1;
     while (i < arr.len) : (i += 1) {
         const key = arr[i];
@@ -263,139 +397,42 @@ fn sort_f64(arr: []f64) void {
     }
 }
 
-fn pearson(x: []const f64, y: []const f64, y_mean: f64) f64 {
-    if (x.len != y.len or x.len == 0) return 0;
+fn run_monte_carlo(model: *const Model, center: []const f64, n: u32) MonteCarloResult {
+    const nv = model.n_vars;
 
-    // Compute mean of x
-    var x_sum: f64 = 0;
-    for (x) |val| x_sum += val;
-    const x_mean = x_sum / @as(f64, @floatFromInt(x.len));
+    // Seed PRNG
+    if (nv > 0) prng_state[0] = @bitCast(center[0]);
+    if (nv > 1) prng_state[1] = @bitCast(center[1]);
 
-    // Compute covariance and variances
-    var cov: f64 = 0;
-    var var_x: f64 = 0;
-    var var_y: f64 = 0;
+    var profits: [MAX_SCENARIOS]f64 = undefined;
+    // Store per-variable values for sensitivity (ring buffer of feasible scenarios)
+    var var_buf: [MAX_VARS][MAX_SCENARIOS]f64 = undefined;
+    var scenario_vars: [MAX_VARS]f64 = undefined;
 
-    for (x, y) |xi, yi| {
-        const dx = xi - x_mean;
-        const dy = yi - y_mean;
-        cov += dx * dy;
-        var_x += dx * dx;
-        var_y += dy * dy;
-    }
-
-    const denom = @sqrt(var_x * var_y);
-    if (denom < 1e-10) return 0;
-    return cov / denom;
-}
-
-fn compute_sensitivity(inputs: []const Input, profits: []const f64, profit_mean: f64) [20]f64 {
-    var sens: [20]f64 = undefined;
-    const n = inputs.len;
-
-    // Extract each variable into array and compute correlation
-    var vals: [10000]f64 = undefined;
-
-    // 0: river_stage
-    for (inputs, 0..) |inp, i| vals[i] = inp.river_stage;
-    sens[0] = pearson(vals[0..n], profits, profit_mean);
-
-    // 1: lock_hrs
-    for (inputs, 0..) |inp, i| vals[i] = inp.lock_hrs;
-    sens[1] = pearson(vals[0..n], profits, profit_mean);
-
-    // 2: temp_f
-    for (inputs, 0..) |inp, i| vals[i] = inp.temp_f;
-    sens[2] = pearson(vals[0..n], profits, profit_mean);
-
-    // 3: wind_mph
-    for (inputs, 0..) |inp, i| vals[i] = inp.wind_mph;
-    sens[3] = pearson(vals[0..n], profits, profit_mean);
-
-    // 4: vis_mi
-    for (inputs, 0..) |inp, i| vals[i] = inp.vis_mi;
-    sens[4] = pearson(vals[0..n], profits, profit_mean);
-
-    // 5: precip_in
-    for (inputs, 0..) |inp, i| vals[i] = inp.precip_in;
-    sens[5] = pearson(vals[0..n], profits, profit_mean);
-
-    // 6: inv_don
-    for (inputs, 0..) |inp, i| vals[i] = inp.inv_don;
-    sens[6] = pearson(vals[0..n], profits, profit_mean);
-
-    // 7: inv_geis
-    for (inputs, 0..) |inp, i| vals[i] = inp.inv_geis;
-    sens[7] = pearson(vals[0..n], profits, profit_mean);
-
-    // 8: stl_outage
-    for (inputs, 0..) |inp, i| vals[i] = inp.stl_outage;
-    sens[8] = pearson(vals[0..n], profits, profit_mean);
-
-    // 9: mem_outage
-    for (inputs, 0..) |inp, i| vals[i] = inp.mem_outage;
-    sens[9] = pearson(vals[0..n], profits, profit_mean);
-
-    // 10: barge_count
-    for (inputs, 0..) |inp, i| vals[i] = inp.barge_count;
-    sens[10] = pearson(vals[0..n], profits, profit_mean);
-
-    // 11: nola_buy
-    for (inputs, 0..) |inp, i| vals[i] = inp.nola_buy;
-    sens[11] = pearson(vals[0..n], profits, profit_mean);
-
-    // 12: sell_stl
-    for (inputs, 0..) |inp, i| vals[i] = inp.sell_stl;
-    sens[12] = pearson(vals[0..n], profits, profit_mean);
-
-    // 13: sell_mem
-    for (inputs, 0..) |inp, i| vals[i] = inp.sell_mem;
-    sens[13] = pearson(vals[0..n], profits, profit_mean);
-
-    // 14: fr_don_stl
-    for (inputs, 0..) |inp, i| vals[i] = inp.fr_don_stl;
-    sens[14] = pearson(vals[0..n], profits, profit_mean);
-
-    // 15: fr_don_mem
-    for (inputs, 0..) |inp, i| vals[i] = inp.fr_don_mem;
-    sens[15] = pearson(vals[0..n], profits, profit_mean);
-
-    // 16: fr_geis_stl
-    for (inputs, 0..) |inp, i| vals[i] = inp.fr_geis_stl;
-    sens[16] = pearson(vals[0..n], profits, profit_mean);
-
-    // 17: fr_geis_mem
-    for (inputs, 0..) |inp, i| vals[i] = inp.fr_geis_mem;
-    sens[17] = pearson(vals[0..n], profits, profit_mean);
-
-    // 18: nat_gas
-    for (inputs, 0..) |inp, i| vals[i] = inp.nat_gas;
-    sens[18] = pearson(vals[0..n], profits, profit_mean);
-
-    // 19: working_cap
-    for (inputs, 0..) |inp, i| vals[i] = inp.working_cap;
-    sens[19] = pearson(vals[0..n], profits, profit_mean);
-
-    return sens;
-}
-
-fn run_monte_carlo(center: Input, n: u32) MonteCarloResult {
-    // Seed PRNG with current time-ish value
-    prng_state[0] = @bitCast(center.river_stage);
-    prng_state[1] = @bitCast(center.nola_buy);
-
-    var profits: [10000]f64 = undefined;
-    var inputs: [10000]Input = undefined;
-    const count = if (n > 10000) @as(u32, 10000) else n;
+    const count = if (n > MAX_SCENARIOS) @as(u32, MAX_SCENARIOS) else n;
     var n_feasible: u32 = 0;
 
     for (0..count) |_| {
-        const scenario = perturb_correlated(center);
-        const result = solve_one(scenario);
-        if (result.status == 0 and result.profit > 0) {
-            profits[n_feasible] = result.profit;
-            inputs[n_feasible] = scenario;
-            n_feasible += 1;
+        perturb(model, center, &scenario_vars);
+        const result = solve_one(model, scenario_vars[0..nv]);
+
+        if (result.status == 0) {
+            const metric: f64 = switch (model.obj_mode) {
+                OBJ_MIN_COST => -result.cost, // negate so "higher is better" for stats
+                OBJ_MAX_ROI => result.roi,
+                else => result.profit,
+            };
+
+            if (model.obj_mode == OBJ_MIN_RISK) {
+                // For min_risk, record all feasible (including negative profit)
+                profits[n_feasible] = metric;
+                for (0..nv) |vi| var_buf[vi][n_feasible] = scenario_vars[vi];
+                n_feasible += 1;
+            } else if (metric > 0 or model.obj_mode == OBJ_MIN_COST) {
+                profits[n_feasible] = metric;
+                for (0..nv) |vi| var_buf[vi][n_feasible] = scenario_vars[vi];
+                n_feasible += 1;
+            }
         }
     }
 
@@ -404,16 +441,11 @@ fn run_monte_carlo(center: Input, n: u32) MonteCarloResult {
             .n_scenarios = count,
             .n_feasible = 0,
             .n_infeasible = count,
-            .mean = 0,
-            .stddev = 0,
-            .p5 = 0,
-            .p25 = 0,
-            .p50 = 0,
-            .p75 = 0,
-            .p95 = 0,
-            .min = 0,
-            .max = 0,
-            .sensitivity = [_]f64{0} ** 20,
+            .mean = 0, .stddev = 0,
+            .p5 = 0, .p25 = 0, .p50 = 0, .p75 = 0, .p95 = 0,
+            .min = 0, .max = 0,
+            .sensitivity = [_]f64{0} ** MAX_VARS,
+            .n_vars = model.n_vars,
         };
     }
 
@@ -428,8 +460,11 @@ fn run_monte_carlo(center: Input, n: u32) MonteCarloResult {
     for (profits[0..n_feasible]) |p| var_sum += (p - mean) * (p - mean);
     const stddev = @sqrt(var_sum / @as(f64, @floatFromInt(n_feasible)));
 
-    // Compute sensitivity (Pearson correlation of each variable with profit)
-    const sensitivity = compute_sensitivity(inputs[0..n_feasible], profits[0..n_feasible], mean);
+    // Sensitivity: Pearson correlation for each variable
+    var sensitivity: [MAX_VARS]f64 = [_]f64{0} ** MAX_VARS;
+    for (0..nv) |vi| {
+        sensitivity[vi] = pearson(var_buf[vi][0..n_feasible], profits[0..n_feasible], mean);
+    }
 
     const nf = n_feasible;
     return MonteCarloResult{
@@ -446,47 +481,211 @@ fn run_monte_carlo(center: Input, n: u32) MonteCarloResult {
         .min = profits[0],
         .max = profits[nf - 1],
         .sensitivity = sensitivity,
+        .n_vars = model.n_vars,
     };
-}
-
-fn encode_monte_carlo(mc: MonteCarloResult) [253]u8 {
-    var buf: [253]u8 = undefined;
-    buf[0] = 0; // status OK
-
-    var off: usize = 1;
-
-    const ints = [3]u32{ mc.n_scenarios, mc.n_feasible, mc.n_infeasible };
-    for (ints) |v| {
-        const bytes = @as(*const [4]u8, @ptrCast(&v));
-        @memcpy(buf[off .. off + 4], bytes);
-        off += 4;
-    }
-
-    const floats = [10]f64{
-        mc.mean, mc.stddev, mc.p5, mc.p25, mc.p50,
-        mc.p75, mc.p95, mc.min, mc.max, 0, // padding
-    };
-    for (floats) |v| {
-        const bytes = @as(*const [8]u8, @ptrCast(&v));
-        @memcpy(buf[off .. off + 8], bytes);
-        off += 8;
-    }
-
-    // Append 20 sensitivity values
-    for (mc.sensitivity) |v| {
-        const bytes = @as(*const [8]u8, @ptrCast(&v));
-        @memcpy(buf[off .. off + 8], bytes);
-        off += 8;
-    }
-
-    return buf;
 }
 
 // ============================================================
-// Port protocol: read/write with 4-byte length prefix
+// Binary Parsing — model descriptor from Elixir
+// ============================================================
+fn read_u8(data: []const u8, off: *usize) u8 {
+    if (off.* >= data.len) return 0;
+    const v = data[off.*];
+    off.* += 1;
+    return v;
+}
+
+fn read_u16(data: []const u8, off: *usize) u16 {
+    if (off.* + 2 > data.len) return 0;
+    var buf: [2]u8 = undefined;
+    @memcpy(&buf, data[off.* .. off.* + 2]);
+    off.* += 2;
+    return std.mem.readInt(u16, &buf, .little);
+}
+
+fn read_u32(data: []const u8, off: *usize) u32 {
+    if (off.* + 4 > data.len) return 0;
+    var buf: [4]u8 = undefined;
+    @memcpy(&buf, data[off.* .. off.* + 4]);
+    off.* += 4;
+    return std.mem.readInt(u32, &buf, .little);
+}
+
+fn read_f64(data: []const u8, off: *usize) f64 {
+    if (off.* + 8 > data.len) return 0;
+    var buf: [8]u8 = undefined;
+    @memcpy(&buf, data[off.* .. off.* + 8]);
+    off.* += 8;
+    return @bitCast(buf);
+}
+
+fn parse_model(data: []const u8, off: *usize) Model {
+    var m = Model{
+        .n_vars = 0,
+        .n_routes = 0,
+        .n_constraints = 0,
+        .obj_mode = OBJ_MAX_PROFIT,
+        .lambda = 0,
+        .profit_floor = 0,
+        .routes = undefined,
+        .constraints = undefined,
+        .perturbations = undefined,
+    };
+
+    // Initialize arrays
+    for (0..MAX_ROUTES) |i| {
+        m.routes[i] = Route{
+            .sell_var_idx = 0, .buy_var_idx = 0, .freight_var_idx = 0,
+            .transit_cost_per_day = 0, .base_transit_days = 0, .unit_capacity = 1500,
+        };
+    }
+    for (0..MAX_CONSTRAINTS) |i| {
+        m.constraints[i] = Constraint{
+            .ctype = 0, .bound_var_idx = 0, .bound_min_var_idx = 0xFF,
+            .outage_var_idx = 0xFF, .outage_factor = 0.5,
+            .n_routes = 0, .route_indices = undefined, .coefficients = undefined,
+        };
+    }
+    for (0..MAX_VARS) |i| {
+        m.perturbations[i] = Perturbation{
+            .stddev = 0, .lo = 0, .hi = 0, .n_corr = 0, .corr = undefined,
+        };
+    }
+
+    // Header
+    m.n_vars = read_u16(data, off);
+    m.n_routes = read_u8(data, off);
+    m.n_constraints = read_u8(data, off);
+    m.obj_mode = read_u8(data, off);
+    m.lambda = read_f64(data, off);
+    m.profit_floor = read_f64(data, off);
+
+    // Routes
+    for (0..m.n_routes) |i| {
+        m.routes[i].sell_var_idx = read_u8(data, off);
+        m.routes[i].buy_var_idx = read_u8(data, off);
+        m.routes[i].freight_var_idx = read_u8(data, off);
+        m.routes[i].transit_cost_per_day = read_f64(data, off);
+        m.routes[i].base_transit_days = read_f64(data, off);
+        m.routes[i].unit_capacity = read_f64(data, off);
+    }
+
+    // Constraints
+    for (0..m.n_constraints) |i| {
+        m.constraints[i].ctype = read_u8(data, off);
+        m.constraints[i].bound_var_idx = read_u8(data, off);
+        m.constraints[i].bound_min_var_idx = read_u8(data, off);
+        m.constraints[i].outage_var_idx = read_u8(data, off);
+        m.constraints[i].outage_factor = read_f64(data, off);
+        m.constraints[i].n_routes = read_u8(data, off);
+        for (0..m.constraints[i].n_routes) |ri| {
+            m.constraints[i].route_indices[ri] = read_u8(data, off);
+        }
+        // Capital constraints need per-route coefficients? No — they compute from route defs.
+        // Custom constraints carry explicit coefficients.
+        if (m.constraints[i].ctype == CT_CUSTOM) {
+            for (0..m.constraints[i].n_routes) |ri| {
+                m.constraints[i].coefficients[ri] = read_f64(data, off);
+            }
+        }
+    }
+
+    // Perturbation specs (for Monte Carlo)
+    for (0..m.n_vars) |i| {
+        m.perturbations[i].stddev = read_f64(data, off);
+        m.perturbations[i].lo = read_f64(data, off);
+        m.perturbations[i].hi = read_f64(data, off);
+        m.perturbations[i].n_corr = read_u8(data, off);
+        for (0..m.perturbations[i].n_corr) |ci| {
+            m.perturbations[i].corr[ci].var_idx = read_u8(data, off);
+            m.perturbations[i].corr[ci].coefficient = read_f64(data, off);
+        }
+    }
+
+    return m;
+}
+
+fn parse_variables(data: []const u8, off: *usize, n: u16) [MAX_VARS]f64 {
+    var vars: [MAX_VARS]f64 = [_]f64{0} ** MAX_VARS;
+    for (0..n) |i| {
+        vars[i] = read_f64(data, off);
+    }
+    return vars;
+}
+
+// ============================================================
+// Response Encoding
+// ============================================================
+fn encode_solve_result(r: *const SolveResult, buf: []u8) usize {
+    var off: usize = 0;
+
+    buf[off] = r.status;
+    off += 1;
+    buf[off] = r.n_routes;
+    off += 1;
+    buf[off] = r.n_constraints;
+    off += 1;
+
+    write_f64(buf, &off, r.profit);
+    write_f64(buf, &off, r.tons);
+    write_f64(buf, &off, r.cost);
+    write_f64(buf, &off, r.roi);
+
+    for (0..r.n_routes) |i| write_f64(buf, &off, r.route_tons[i]);
+    for (0..r.n_routes) |i| write_f64(buf, &off, r.route_profits[i]);
+    for (0..r.n_routes) |i| write_f64(buf, &off, r.margins[i]);
+    for (0..r.n_constraints) |i| write_f64(buf, &off, r.shadow[i]);
+
+    return off;
+}
+
+fn encode_monte_carlo(mc: *const MonteCarloResult, buf: []u8) usize {
+    var off: usize = 0;
+
+    buf[off] = 0; // status OK
+    off += 1;
+
+    write_u16(buf, &off, mc.n_vars);
+    write_u32(buf, &off, mc.n_scenarios);
+    write_u32(buf, &off, mc.n_feasible);
+    write_u32(buf, &off, mc.n_infeasible);
+
+    write_f64(buf, &off, mc.mean);
+    write_f64(buf, &off, mc.stddev);
+    write_f64(buf, &off, mc.p5);
+    write_f64(buf, &off, mc.p25);
+    write_f64(buf, &off, mc.p50);
+    write_f64(buf, &off, mc.p75);
+    write_f64(buf, &off, mc.p95);
+    write_f64(buf, &off, mc.min);
+    write_f64(buf, &off, mc.max);
+
+    // Sensitivity values (one per variable)
+    for (0..mc.n_vars) |i| write_f64(buf, &off, mc.sensitivity[i]);
+
+    return off;
+}
+
+fn write_f64(buf: []u8, off: *usize, val: f64) void {
+    const bytes = @as(*const [8]u8, @ptrCast(&val));
+    @memcpy(buf[off.* .. off.* + 8], bytes);
+    off.* += 8;
+}
+
+fn write_u16(buf: []u8, off: *usize, val: u16) void {
+    std.mem.writeInt(u16, buf[off.*..][0..2], val, .little);
+    off.* += 2;
+}
+
+fn write_u32(buf: []u8, off: *usize, val: u32) void {
+    std.mem.writeInt(u32, buf[off.*..][0..4], val, .little);
+    off.* += 4;
+}
+
+// ============================================================
+// Port Protocol
 // ============================================================
 fn read_packet(reader: anytype, buf: []u8) !usize {
-    // Read 4-byte length prefix
     var len_buf: [4]u8 = undefined;
     var read: usize = 0;
     while (read < 4) {
@@ -513,67 +712,15 @@ fn write_packet(writer: anytype, data: []const u8) !void {
     try writer.writeAll(data);
 }
 
-fn parse_input(data: []const u8) Input {
-    var vals: [20]f64 = undefined;
-    for (0..20) |idx| {
-        var bytes: [8]u8 = undefined;
-        @memcpy(&bytes, data[idx * 8 .. idx * 8 + 8]);
-        vals[idx] = @bitCast(bytes);
-    }
-    return Input{
-        .river_stage = vals[0],
-        .lock_hrs = vals[1],
-        .temp_f = vals[2],
-        .wind_mph = vals[3],
-        .vis_mi = vals[4],
-        .precip_in = vals[5],
-        .inv_don = vals[6],
-        .inv_geis = vals[7],
-        .stl_outage = vals[8],
-        .mem_outage = vals[9],
-        .barge_count = vals[10],
-        .nola_buy = vals[11],
-        .sell_stl = vals[12],
-        .sell_mem = vals[13],
-        .fr_don_stl = vals[14],
-        .fr_don_mem = vals[15],
-        .fr_geis_stl = vals[16],
-        .fr_geis_mem = vals[17],
-        .nat_gas = vals[18],
-        .working_cap = vals[19],
-    };
-}
-
-fn encode_solve_result(r: SolveResult) [217]u8 {
-    var buf: [217]u8 = undefined; // 1 + 27*8 = 217
-    buf[0] = r.status;
-
-    var off: usize = 1;
-    const fields = [_]f64{
-        r.profit,           r.tons,             r.barges,           r.cost,          r.eff_barge,
-        r.route_tons[0],    r.route_tons[1],    r.route_tons[2],    r.route_tons[3], r.route_profits[0],
-        r.route_profits[1], r.route_profits[2], r.route_profits[3], r.margins[0],    r.margins[1],
-        r.margins[2],       r.margins[3],       r.transits[0],      r.transits[1],   r.transits[2],
-        r.transits[3],      r.shadow[0],        r.shadow[1],        r.shadow[2],     r.shadow[3],
-        r.shadow[4],        r.shadow[5],
-    };
-
-    for (fields) |v| {
-        const bytes = @as(*const [8]u8, @ptrCast(&v));
-        @memcpy(buf[off .. off + 8], bytes);
-        off += 8;
-    }
-    return buf;
-}
-
 // ============================================================
-// Main loop — reads commands from stdin, writes results to stdout
+// Main Loop
 // ============================================================
 pub fn main() !void {
     const stdin = std.io.getStdIn().reader();
     const stdout = std.io.getStdOut().writer();
 
-    var buf: [65536]u8 = undefined;
+    var buf: [131072]u8 = undefined; // 128KB — enough for large model descriptors
+    var resp: [16384]u8 = undefined;
 
     while (true) {
         const len = read_packet(stdin, &buf) catch break;
@@ -583,22 +730,26 @@ pub fn main() !void {
         const payload = buf[1..len];
 
         switch (cmd) {
+            // cmd 1: single solve
+            // payload: model_descriptor + variables
             1 => {
-                if (payload.len < 160) continue;
-                const input = parse_input(payload);
-                const result = solve_one(input);
-                const encoded = encode_solve_result(result);
-                write_packet(stdout, &encoded) catch break;
+                var off: usize = 0;
+                const model = parse_model(payload, &off);
+                const vars = parse_variables(payload, &off, model.n_vars);
+                const result = solve_one(&model, vars[0..model.n_vars]);
+                const resp_len = encode_solve_result(&result, &resp);
+                write_packet(stdout, resp[0..resp_len]) catch break;
             },
+            // cmd 2: monte carlo
+            // payload: n_scenarios(u32) + model_descriptor + center_variables
             2 => {
-                if (payload.len < 164) continue; // 4 + 20*8
-                var n_buf: [4]u8 = undefined;
-                @memcpy(&n_buf, payload[0..4]);
-                const n: u32 = @bitCast(n_buf);
-                const input = parse_input(payload[4..]);
-                const mc = run_monte_carlo(input, n);
-                const encoded = encode_monte_carlo(mc);
-                write_packet(stdout, &encoded) catch break;
+                var off: usize = 0;
+                const n_scenarios = read_u32(payload, &off);
+                const model = parse_model(payload, &off);
+                const center = parse_variables(payload, &off, model.n_vars);
+                const mc = run_monte_carlo(&model, center[0..model.n_vars], n_scenarios);
+                const resp_len = encode_monte_carlo(&mc, &resp);
+                write_packet(stdout, resp[0..resp_len]) catch break;
             },
             else => {},
         }
