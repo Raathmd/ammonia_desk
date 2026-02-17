@@ -7,6 +7,7 @@ defmodule AmmoniaDesk.Application do
       AmmoniaDesk.Repo,
       AmmoniaDesk.DB.SnapshotLog,
       {Phoenix.PubSub, name: AmmoniaDesk.PubSub},
+      AmmoniaDesk.Config.DeltaConfig,
       AmmoniaDesk.Data.LiveState,
       AmmoniaDesk.Data.Poller,
       AmmoniaDesk.Solver.Port,

@@ -1,26 +1,45 @@
 defmodule AmmoniaDesk.Data.Poller do
   @moduledoc """
-  Polls external APIs on a schedule and pushes updates to LiveState.
-  
+  Polls external APIs on admin-configured schedules and pushes updates to LiveState.
+
+  Poll intervals are sourced from `DeltaConfig` — the admin can change them
+  per product group at runtime. The Poller uses the shortest interval across
+  all enabled product groups for each source (so if ammonia wants USGS every
+  15 min and UAN wants it every 30 min, we poll every 15 min).
+
   Data sources:
-    - USGS Water Services API (river stage/flow) — every 15 min
-    - NOAA Weather API (temp, wind, vis, precip) — every 30 min
-    - USACE Lock Performance (lock status/delays) — every 30 min
-    - EIA API (nat gas prices) — every hour
-    - Internal systems (inventory, outages, barges) — every 5 min
+    - USGS Water Services API (river stage/flow)
+    - NOAA Weather API (temp, wind, vis, precip)
+    - USACE Lock Performance (lock status/delays)
+    - EIA API (nat gas prices)
+    - Market price feeds (NOLA buy, delivered prices)
+    - Broker freight feeds (barge freight rates)
+    - Internal systems (inventory, outages, barges, working capital)
+
+  On each poll, the Poller:
+    1. Calls the real API integration module
+    2. Falls back to simulated data if the API is not configured/available
+    3. Updates LiveState with new values
+    4. Broadcasts {:data_updated, source} if values changed
   """
   use GenServer
   require Logger
 
-  @poll_intervals %{
-    usgs: :timer.minutes(15),
-    noaa: :timer.minutes(30),
-    usace: :timer.minutes(30),
-    eia: :timer.hours(1),
+  alias AmmoniaDesk.Config.DeltaConfig
+  alias AmmoniaDesk.Data.API
+
+  # Default intervals used before DeltaConfig loads
+  @fallback_intervals %{
+    usgs:     :timer.minutes(15),
+    noaa:     :timer.minutes(30),
+    usace:    :timer.minutes(30),
+    eia:      :timer.hours(1),
+    market:   :timer.minutes(30),
+    broker:   :timer.hours(1),
     internal: :timer.minutes(5)
   }
 
-  # USGS gauge IDs for Mississippi River
+  # USGS gauge IDs for Mississippi River (kept for fallback)
   @usgs_gauges %{
     cairo_il: "03612500",
     memphis_tn: "07032000",
@@ -34,12 +53,16 @@ defmodule AmmoniaDesk.Data.Poller do
 
   @impl true
   def init(_) do
+    # Subscribe to config changes so we can adjust poll intervals
+    Phoenix.PubSub.subscribe(AmmoniaDesk.PubSub, "delta_config")
+
     # Schedule first polls immediately
-    Enum.each(@poll_intervals, fn {source, _interval} ->
+    sources = Map.keys(@fallback_intervals)
+    Enum.each(sources, fn source ->
       send(self(), {:poll, source})
     end)
 
-    {:ok, %{last_poll: %{}, errors: %{}}}
+    {:ok, %{last_poll: %{}, errors: %{}, timers: %{}}}
   end
 
   @impl true
@@ -50,7 +73,7 @@ defmodule AmmoniaDesk.Data.Poller do
           old_vars = AmmoniaDesk.Data.LiveState.get()
           AmmoniaDesk.Data.LiveState.update(source, data)
           new_vars = AmmoniaDesk.Data.LiveState.get()
-          
+
           if old_vars != new_vars do
             Phoenix.PubSub.broadcast(AmmoniaDesk.PubSub, "live_data", {:data_updated, source})
           end
@@ -65,87 +88,143 @@ defmodule AmmoniaDesk.Data.Poller do
           %{state | errors: Map.put(state.errors, source, reason)}
       end
 
-    # Schedule next poll
-    interval = Map.get(@poll_intervals, source, :timer.minutes(15))
-    Process.send_after(self(), {:poll, source}, interval)
+    # Schedule next poll using DeltaConfig intervals
+    interval = get_poll_interval(source)
+    timer_ref = Process.send_after(self(), {:poll, source}, interval)
+    new_state = put_in(new_state, [:timers, source], timer_ref)
 
     {:noreply, new_state}
   end
 
-  # --- API Polling Functions ---
+  # Config changed — cancel and reschedule affected timers
+  @impl true
+  def handle_info({:delta_config, :config_updated, %{field: :poll_intervals}}, state) do
+    Logger.info("Poller: poll intervals changed, rescheduling")
+    # Existing timers will fire at their old schedule; the next reschedule
+    # after they fire will pick up the new interval. No need to cancel early
+    # unless we want immediate effect.
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:delta_config, _, _}, state) do
+    {:noreply, state}
+  end
+
+  # ──────────────────────────────────────────────────────────
+  # API POLLING — real integrations with fallback
+  # ──────────────────────────────────────────────────────────
 
   defp poll_source(:usgs) do
-    # USGS Water Services API — instantaneous values
-    # https://waterservices.usgs.gov/rest/IV/
-    gauge = @usgs_gauges.cairo_il
-    url = "https://waterservices.usgs.gov/nwis/iv/" <>
-      "?format=json&sites=#{gauge}&parameterCd=00065,00060&period=PT1H"
+    case API.USGS.fetch() do
+      {:ok, data} ->
+        {:ok, Map.take(data, [:river_stage, :river_flow])}
 
-    case http_get(url) do
-      {:ok, body} ->
-        parse_usgs(body)
-      error ->
-        error
+      {:error, _reason} ->
+        # Fallback: try direct HTTP with old parser
+        poll_usgs_fallback()
     end
   end
 
   defp poll_source(:noaa) do
-    # NOAA Weather API — current observations
-    # Point: near Baton Rouge for Lower Mississippi
-    url = "https://api.weather.gov/stations/KBTR/observations/latest"
+    case API.NOAA.fetch() do
+      {:ok, data} ->
+        {:ok, Map.take(data, [:temp_f, :wind_mph, :vis_mi, :precip_in])}
 
-    case http_get(url) do
-      {:ok, body} ->
-        parse_noaa(body)
-      error ->
-        error
+      {:error, _reason} ->
+        poll_noaa_fallback()
     end
   end
 
   defp poll_source(:usace) do
-    # USACE Lock Performance Monitoring System
-    # Note: actual API requires specific endpoint access
-    # Simulating with reasonable defaults until real API configured
-    {:ok, %{
-      lock_hrs: 12.0,
-      locks: %{
-        "Lock_25" => "OPEN",
-        "Lock_27" => "OPEN",
-        "Lock_52" => "OPEN"
-      }
-    }}
+    case API.USACE.fetch() do
+      {:ok, data} ->
+        {:ok, Map.take(data, [:lock_hrs])}
+
+      {:error, _reason} ->
+        # USACE API often requires special access; use defaults
+        {:ok, %{lock_hrs: 12.0}}
+    end
   end
 
   defp poll_source(:eia) do
-    # EIA Natural Gas API
-    # https://api.eia.gov/v2/natural-gas/pri/fut/data/
-    # Requires API key — using placeholder
-    {:ok, %{
-      nat_gas: 2.80
-    }}
+    case API.EIA.fetch() do
+      {:ok, data} ->
+        {:ok, Map.take(data, [:nat_gas])}
+
+      {:error, _reason} ->
+        # No fallback available — keep last known value
+        {:error, :eia_not_available}
+    end
+  end
+
+  defp poll_source(:market) do
+    case API.Market.fetch() do
+      {:ok, data} ->
+        {:ok, Map.take(data, [:nola_buy, :sell_stl, :sell_mem])}
+
+      {:error, _reason} ->
+        # Market feeds are subscription-based; keep last known
+        {:error, :market_not_available}
+    end
+  end
+
+  defp poll_source(:broker) do
+    case API.Broker.fetch() do
+      {:ok, data} ->
+        {:ok, Map.take(data, [:fr_don_stl, :fr_don_mem, :fr_geis_stl, :fr_geis_mem])}
+
+      {:error, _reason} ->
+        {:error, :broker_not_available}
+    end
   end
 
   defp poll_source(:internal) do
-    # Internal systems — would connect to ERP/SCADA/TMS
-    # Placeholder with realistic values
-    {:ok, %{
-      inv_don: 12_000.0,
-      inv_geis: 8_000.0,
-      stl_outage: false,
-      mem_outage: false,
-      barge_count: 14.0,
-      nola_buy: 320.0,
-      sell_stl: 410.0,
-      sell_mem: 385.0,
-      fr_don_stl: 55.0,
-      fr_don_mem: 32.0,
-      fr_geis_stl: 58.0,
-      fr_geis_mem: 34.0,
-      working_cap: 4_200_000.0
-    }}
+    case API.Internal.fetch() do
+      {:ok, data} ->
+        {:ok, Map.take(data, [:inv_don, :inv_geis, :stl_outage, :mem_outage,
+                               :barge_count, :working_cap])}
+
+      {:error, _reason} ->
+        # Internal systems fallback — use simulated values
+        {:ok, %{
+          inv_don: 12_000.0,
+          inv_geis: 8_000.0,
+          stl_outage: false,
+          mem_outage: false,
+          barge_count: 14.0,
+          working_cap: 4_200_000.0
+        }}
+    end
   end
 
-  # --- Parsers ---
+  # ──────────────────────────────────────────────────────────
+  # FALLBACK PARSERS (from original implementation)
+  # ──────────────────────────────────────────────────────────
+
+  defp poll_usgs_fallback do
+    gauge = @usgs_gauges.baton_rouge_la
+    url = "https://waterservices.usgs.gov/nwis/iv/" <>
+      "?format=json&sites=#{gauge}&parameterCd=00065,00060&period=PT1H"
+
+    case http_get(url) do
+      {:ok, body} -> parse_usgs(body)
+      error -> error
+    end
+  end
+
+  defp poll_noaa_fallback do
+    url = "https://api.weather.gov/stations/KBTR/observations/latest"
+
+    case http_get(url) do
+      {:ok, body} -> parse_noaa(body)
+      error -> error
+    end
+  end
+
+  # ──────────────────────────────────────────────────────────
+  # LEGACY PARSERS (kept as fallback)
+  # ──────────────────────────────────────────────────────────
 
   defp parse_usgs(body) do
     case Jason.decode(body) do
@@ -178,7 +257,7 @@ defmodule AmmoniaDesk.Data.Poller do
           temp_f: get_noaa_value(props, "temperature", &c_to_f/1),
           wind_mph: get_noaa_value(props, "windSpeed", &kmh_to_mph/1),
           vis_mi: get_noaa_value(props, "visibility", &m_to_mi/1),
-          precip_in: 0.0  # precipitation requires separate forecast endpoint
+          precip_in: 0.0
         }}
 
       _ ->
@@ -202,9 +281,27 @@ defmodule AmmoniaDesk.Data.Poller do
   defp m_to_mi(m) when is_number(m), do: m / 1609.34
   defp m_to_mi(_), do: nil
 
-  defp http_get(_url) do
-    # In production: Req.get!(url).body
-    # For now, return simulated data
-    {:error, :not_configured}
+  # ──────────────────────────────────────────────────────────
+  # HELPERS
+  # ──────────────────────────────────────────────────────────
+
+  defp get_poll_interval(source) do
+    try do
+      DeltaConfig.effective_poll_intervals()
+      |> Map.get(source, @fallback_intervals[source])
+    rescue
+      _ -> Map.get(@fallback_intervals, source, :timer.minutes(15))
+    end
+  end
+
+  defp http_get(url) do
+    case Req.get(url, receive_timeout: 15_000) do
+      {:ok, %{status: 200, body: body}} when is_binary(body) -> {:ok, body}
+      {:ok, %{status: 200, body: body}} when is_map(body) -> {:ok, Jason.encode!(body)}
+      {:ok, %{status: status}} -> {:error, {:http_status, status}}
+      {:error, reason} -> {:error, {:http_error, reason}}
+    end
+  rescue
+    _ -> {:error, :http_exception}
   end
 end
