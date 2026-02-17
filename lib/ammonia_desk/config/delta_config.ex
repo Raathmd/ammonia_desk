@@ -138,11 +138,60 @@ defmodule AmmoniaDesk.Config.DeltaConfig do
       },
       min_solve_interval_ms: :timer.minutes(5),
       n_scenarios: 1000
+    },
+
+    sulphur_international: %{
+      enabled: false,
+      product_group: :sulphur_international,
+      poll_intervals: %{
+        market_prices:    :timer.minutes(30),
+        ocean_freight:    :timer.hours(1),
+        vessel_tracking:  :timer.minutes(15),
+        nat_gas:          :timer.hours(2),
+        fx_rates:         :timer.minutes(30),
+        bunker_fuel:      :timer.hours(1),
+        internal:         :timer.minutes(10)
+      },
+      thresholds: AmmoniaDesk.ProductGroup.default_thresholds(:sulphur_international),
+      min_solve_interval_ms: :timer.minutes(5),
+      n_scenarios: 1000
+    },
+
+    ammonia_international: %{
+      enabled: false,
+      product_group: :ammonia_international,
+      poll_intervals: %{
+        market_prices:    :timer.minutes(30),
+        ocean_freight:    :timer.hours(1),
+        vessel_tracking:  :timer.minutes(15),
+        nat_gas:          :timer.hours(2),
+        fx_rates:         :timer.minutes(30),
+        bunker_fuel:      :timer.hours(1),
+        internal:         :timer.minutes(10)
+      },
+      thresholds: AmmoniaDesk.ProductGroup.default_thresholds(:ammonia_international),
+      min_solve_interval_ms: :timer.minutes(5),
+      n_scenarios: 1000
+    },
+
+    petcoke: %{
+      enabled: false,
+      product_group: :petcoke,
+      poll_intervals: %{
+        market_prices:    :timer.minutes(30),
+        ocean_freight:    :timer.hours(1),
+        vessel_tracking:  :timer.minutes(15),
+        nat_gas:          :timer.hours(2),
+        internal:         :timer.minutes(10)
+      },
+      thresholds: AmmoniaDesk.ProductGroup.default_thresholds(:petcoke),
+      min_solve_interval_ms: :timer.minutes(5),
+      n_scenarios: 1000
     }
   }
 
-  # Variable index for bitmask (0-19) — used in on-chain trigger section
-  @variable_indices %{
+  # Legacy variable indices for backward compat (ammonia domestic)
+  @legacy_variable_indices %{
     river_stage: 0, lock_hrs: 1, temp_f: 2, wind_mph: 3, vis_mi: 4,
     precip_in: 5, inv_don: 6, inv_geis: 7, stl_outage: 8, mem_outage: 9,
     barge_count: 10, nola_buy: 11, sell_stl: 12, sell_mem: 13,
@@ -186,17 +235,31 @@ defmodule AmmoniaDesk.Config.DeltaConfig do
 
   @doc "Get variable index for bitmask encoding."
   @spec variable_index(atom()) :: non_neg_integer()
-  def variable_index(key), do: Map.get(@variable_indices, key, 0)
+  def variable_index(key), do: Map.get(@legacy_variable_indices, key, 0)
+
+  @doc "Get variable index for a specific product group."
+  @spec variable_index(atom(), atom()) :: non_neg_integer()
+  def variable_index(key, product_group) do
+    indices = AmmoniaDesk.ProductGroup.variable_indices(product_group)
+    Map.get(indices, key, 0)
+  end
 
   @doc "Get variable key from bitmask index."
   @spec variable_from_index(non_neg_integer()) :: atom()
   def variable_from_index(index) do
-    @variable_indices
+    @legacy_variable_indices
     |> Enum.find(fn {_k, v} -> v == index end)
     |> case do
       {k, _} -> k
       nil -> :unknown
     end
+  end
+
+  @doc "Get variable key from bitmask index for a specific product group."
+  @spec variable_from_index(non_neg_integer(), atom()) :: atom()
+  def variable_from_index(index, product_group) do
+    keys = AmmoniaDesk.ProductGroup.variable_keys(product_group)
+    Enum.at(keys, index, :unknown)
   end
 
   @doc """

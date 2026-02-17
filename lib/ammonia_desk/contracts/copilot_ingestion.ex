@@ -68,6 +68,8 @@ defmodule AmmoniaDesk.Contracts.CopilotIngestion do
     Parser
   }
 
+  alias AmmoniaDesk.ProductGroup
+
   require Logger
 
   @pubsub AmmoniaDesk.PubSub
@@ -92,8 +94,10 @@ defmodule AmmoniaDesk.Contracts.CopilotIngestion do
   """
   @spec ingest(String.t(), map(), keyword()) :: {:ok, Contract.t()} | {:error, term()}
   def ingest(file_path, extraction, opts \\ []) do
+    product_group = Keyword.get(opts, :product_group, :ammonia_domestic)
+
     with {:hash, {:ok, file_hash, file_size}} <- {:hash, HashVerifier.compute_file_hash(file_path)},
-         {:extract, {:ok, clauses}} <- {:extract, build_clauses(extraction)} do
+         {:extract, {:ok, clauses}} <- {:extract, build_clauses(extraction, product_group)} do
 
       # Register any new clause types Copilot discovered
       register_new_clauses(extraction)
@@ -138,7 +142,9 @@ defmodule AmmoniaDesk.Contracts.CopilotIngestion do
   """
   @spec ingest_with_hash(map(), keyword()) :: {:ok, Contract.t()} | {:error, term()}
   def ingest_with_hash(extraction, opts \\ []) do
-    with {:extract, {:ok, clauses}} <- {:extract, build_clauses(extraction)} do
+    product_group = Keyword.get(opts, :product_group, :ammonia_domestic)
+
+    with {:extract, {:ok, clauses}} <- {:extract, build_clauses(extraction, product_group)} do
       register_new_clauses(extraction)
 
       file_hash = get_string(extraction, "file_hash")
@@ -203,8 +209,9 @@ defmodule AmmoniaDesk.Contracts.CopilotIngestion do
   # CLAUSE BUILDING — convert Copilot JSON to %Clause{} structs
   # ──────────────────────────────────────────────────────────
 
-  defp build_clauses(%{"clauses" => clauses}) when is_list(clauses) do
+  defp build_clauses(%{"clauses" => clauses}, product_group) when is_list(clauses) do
     now = DateTime.utc_now()
+    term_map = ProductGroup.contract_term_map(product_group)
 
     built =
       Enum.map(clauses, fn clause_data ->
@@ -219,8 +226,8 @@ defmodule AmmoniaDesk.Contracts.CopilotIngestion do
           anchors_matched: get_list(clause_data, "anchors_matched") || [],
           extracted_fields: get_map(clause_data, "extracted_fields") || %{},
           extracted_at: now,
-          # Map LP-relevant fields
-          parameter: map_lp_parameter(clause_data),
+          # Map LP-relevant fields using product group's term map
+          parameter: map_lp_parameter(clause_data, term_map),
           operator: map_operator(clause_data),
           value: get_number(clause_data, "value") || get_nested_number(clause_data, "extracted_fields", "price_value"),
           unit: get_string(clause_data, "unit") || get_nested_string(clause_data, "extracted_fields", "price_uom"),
@@ -232,7 +239,7 @@ defmodule AmmoniaDesk.Contracts.CopilotIngestion do
     {:ok, built}
   end
 
-  defp build_clauses(_), do: {:error, :no_clauses_in_extraction}
+  defp build_clauses(_, _product_group), do: {:error, :no_clauses_in_extraction}
 
   # ──────────────────────────────────────────────────────────
   # CONTRACT BUILDING
@@ -240,7 +247,7 @@ defmodule AmmoniaDesk.Contracts.CopilotIngestion do
 
   defp build_contract(extraction, clauses, file_path, file_hash, file_size, opts) do
     counterparty = get_string(extraction, "counterparty") || "Unknown"
-    product_group = Keyword.get(opts, :product_group, :ammonia)
+    product_group = Keyword.get(opts, :product_group, :ammonia_domestic)
 
     %Contract{
       counterparty: counterparty,
@@ -399,15 +406,11 @@ defmodule AmmoniaDesk.Contracts.CopilotIngestion do
   end
   defp map_clause_type(_), do: :condition
 
-  defp map_lp_parameter(%{"clause_id" => "PRICE"}), do: :contract_price
-  defp map_lp_parameter(%{"clause_id" => "QUANTITY_TOLERANCE"}), do: :total_volume
-  defp map_lp_parameter(%{"clause_id" => "PAYMENT"}), do: :working_cap
-  defp map_lp_parameter(%{"clause_id" => "LAYTIME_DEMURRAGE"}), do: :demurrage
-  defp map_lp_parameter(%{"clause_id" => "FORCE_MAJEURE"}), do: :force_majeure
-  defp map_lp_parameter(%{"clause_id" => "INSURANCE"}), do: :insurance
-  defp map_lp_parameter(%{"clause_id" => "WAR_RISK_AND_ROUTE_CLOSURE"}), do: :freight_rate
-  defp map_lp_parameter(%{"clause_id" => "DATES_WINDOWS_NOMINATIONS"}), do: :delivery_window
-  defp map_lp_parameter(_), do: nil
+  # Use the product group's contract_term_map to resolve LP parameters
+  defp map_lp_parameter(%{"clause_id" => clause_id}, term_map) when is_binary(clause_id) do
+    Map.get(term_map, clause_id)
+  end
+  defp map_lp_parameter(_, _term_map), do: nil
 
   defp map_operator(%{"clause_id" => "PRICE"}), do: :==
   defp map_operator(%{"clause_id" => "QUANTITY_TOLERANCE"}), do: :>=

@@ -20,6 +20,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
   """
 
   alias AmmoniaDesk.Contracts.{Clause, TemplateRegistry}
+  alias AmmoniaDesk.ProductGroup
 
   require Logger
 
@@ -191,13 +192,16 @@ defmodule AmmoniaDesk.Contracts.Parser do
   @doc """
   Parse contract text into a list of extracted clauses.
 
+  Accepts an optional product_group atom to drive location/price detection.
+  Falls back to :ammonia_domestic if not specified.
+
   Returns {clauses, warnings, detected_family} where:
     - clauses: list of %Clause{} with canonical clause_ids
     - warnings: list of unparseable paragraphs
     - detected_family: {:ok, family_id, family} | :unknown
   """
-  @spec parse(String.t()) :: {[Clause.t()], [String.t()], term()}
-  def parse(text) when is_binary(text) do
+  @spec parse(String.t(), atom()) :: {[Clause.t()], [String.t()], term()}
+  def parse(text, product_group \\ :ammonia_domestic) when is_binary(text) do
     now = DateTime.utc_now()
 
     paragraphs =
@@ -208,7 +212,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     {clauses, warnings} =
       paragraphs
       |> Enum.reduce({[], []}, fn {section_ref, para}, {clauses_acc, warn_acc} ->
-        case match_canonical_clause(para, section_ref) do
+        case match_canonical_clause(para, section_ref, product_group) do
           {:ok, clause} ->
             clause = %{clause | id: Clause.generate_id(), extracted_at: now}
             {[clause | clauses_acc], warn_acc}
@@ -231,9 +235,9 @@ defmodule AmmoniaDesk.Contracts.Parser do
   @doc """
   Parse and return just clauses + warnings (backward compatible).
   """
-  @spec parse_clauses(String.t()) :: {[Clause.t()], [String.t()]}
-  def parse_clauses(text) do
-    {clauses, warnings, _family} = parse(text)
+  @spec parse_clauses(String.t(), atom()) :: {[Clause.t()], [String.t()]}
+  def parse_clauses(text, product_group \\ :ammonia_domestic) do
+    {clauses, warnings, _family} = parse(text, product_group)
     {clauses, warnings}
   end
 
@@ -364,7 +368,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
   # CANONICAL CLAUSE MATCHING
   # ──────────────────────────────────────────────────────────
 
-  defp match_canonical_clause(para, section_ref) do
+  defp match_canonical_clause(para, section_ref, product_group) do
     result =
       Enum.find_value(@clause_matchers, :skip, fn {clause_id, patterns} ->
         matched_anchors =
@@ -373,7 +377,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
           end)
 
         if length(matched_anchors) > 0 do
-          extract_clause_fields(clause_id, para, section_ref, matched_anchors)
+          extract_clause_fields(clause_id, para, section_ref, matched_anchors, product_group)
         else
           nil
         end
@@ -386,7 +390,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
   # PER-CLAUSE FIELD EXTRACTION
   # ──────────────────────────────────────────────────────────
 
-  defp extract_clause_fields("INCOTERMS", para, section_ref, anchors) do
+  defp extract_clause_fields("INCOTERMS", para, section_ref, anchors, _product_group) do
     lower = String.downcase(para)
 
     incoterm =
@@ -414,9 +418,9 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("PRODUCT_AND_SPECS", para, section_ref, anchors) do
+  defp extract_clause_fields("PRODUCT_AND_SPECS", para, section_ref, anchors, product_group) do
     fields = %{
-      product_name: extract_product_name(para),
+      product_name: extract_product_name(para, product_group),
       purity: extract_field_value(para, ~r/(?:purity|min(?:imum)?)\s*:?\s*([\d.]+)\s*%/i),
       water: extract_field_value(para, ~r/(?:water|moisture)\s*:?\s*(?:max(?:imum)?\s*)?:?\s*([\d.]+)\s*%/i),
       oil: extract_field_value(para, ~r/(?:oil)\s*:?\s*(?:max(?:imum)?\s*)?:?\s*([\d.]+)\s*(?:ppm|%)/i)
@@ -434,7 +438,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("QUANTITY_TOLERANCE", para, section_ref, anchors) do
+  defp extract_clause_fields("QUANTITY_TOLERANCE", para, section_ref, anchors, product_group) do
     lower = String.downcase(para)
     qty = extract_number(para)
     tolerance = extract_percentage(para)
@@ -447,7 +451,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
         true -> nil
       end
 
-    param = detect_volume_parameter(lower)
+    param = detect_volume_parameter(lower, product_group)
 
     case qty do
       {:ok, value} ->
@@ -477,7 +481,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     end
   end
 
-  defp extract_clause_fields("ORIGIN", para, section_ref, anchors) do
+  defp extract_clause_fields("ORIGIN", para, section_ref, anchors, _product_group) do
     fields = %{
       origin_text: para,
       alternate_origin_right: Regex.match?(~r/\bright\s+but\s+not\s+the\s+obligation\b/i, para)
@@ -495,7 +499,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("PORTS_AND_SAFE_BERTH", para, section_ref, anchors) do
+  defp extract_clause_fields("PORTS_AND_SAFE_BERTH", para, section_ref, anchors, _product_group) do
     fields = %{
       load_port: extract_named_value(para, ~r/(?:Port\(?s?\)?\s+of\s+Loading|loading\s+port)\s*:?\s*([^\n,;]+)/i),
       discharge_port: extract_named_value(para, ~r/(?:Port\(?s?\)?\s+of\s+Discharge|discharge\s+port)\s*:?\s*([^\n,;]+)/i),
@@ -515,7 +519,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("DATES_WINDOWS_NOMINATIONS", para, section_ref, anchors) do
+  defp extract_clause_fields("DATES_WINDOWS_NOMINATIONS", para, section_ref, anchors, _product_group) do
     lower = String.downcase(para)
 
     fields = %{
@@ -543,10 +547,10 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("PRICE", para, section_ref, anchors) do
+  defp extract_clause_fields("PRICE", para, section_ref, anchors, product_group) do
     lower = String.downcase(para)
     price = extract_dollar_amount(para)
-    param = detect_price_parameter(lower)
+    param = detect_price_parameter(lower, product_group)
 
     pricing_mechanism =
       cond do
@@ -601,7 +605,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     end
   end
 
-  defp extract_clause_fields("PAYMENT", para, section_ref, anchors) do
+  defp extract_clause_fields("PAYMENT", para, section_ref, anchors, _product_group) do
     payment_method =
       cond do
         Regex.match?(~r/\bletter\s+of\s+credit\b/i, para) -> :lc
@@ -630,7 +634,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("LAYTIME_DEMURRAGE", para, section_ref, anchors) do
+  defp extract_clause_fields("LAYTIME_DEMURRAGE", para, section_ref, anchors, _product_group) do
     lower = String.downcase(para)
 
     demurrage_rate = extract_dollar_amount(para)
@@ -683,7 +687,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     end
   end
 
-  defp extract_clause_fields("CHARTERPARTY_ASBATANKVOY_INCORP", para, section_ref, anchors) do
+  defp extract_clause_fields("CHARTERPARTY_ASBATANKVOY_INCORP", para, section_ref, anchors, _product_group) do
     form =
       cond do
         Regex.match?(~r/\bASBATANKVOY\b/i, para) -> "ASBATANKVOY"
@@ -705,7 +709,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("NOR_AND_READINESS", para, section_ref, anchors) do
+  defp extract_clause_fields("NOR_AND_READINESS", para, section_ref, anchors, _product_group) do
     earliest = extract_field_value(para, ~r/(?:earliest|no\s+earlier\s+than)\s*:?\s*(\d{1,2}:\d{2})/i)
     commencement = extract_named_value(para, ~r/laytime\s+(?:shall\s+)?commence\s*([^\n;.]+)/i)
 
@@ -724,7 +728,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("PRESENTATION_COOLDOWN_GASSING", para, section_ref, anchors) do
+  defp extract_clause_fields("PRESENTATION_COOLDOWN_GASSING", para, section_ref, anchors, _product_group) do
     who_pays =
       cond do
         Regex.match?(~r/\bseller'?s?\s+(?:account|cost|expense)\b/i, para) -> :seller
@@ -749,7 +753,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("VESSEL_ELIGIBILITY", para, section_ref, anchors) do
+  defp extract_clause_fields("VESSEL_ELIGIBILITY", para, section_ref, anchors, _product_group) do
     flags = %{
       iacs: Regex.match?(~r/\bIACS\b/, para),
       pandi: Regex.match?(~r/\bP&I\b/, para),
@@ -770,7 +774,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("INSPECTION_AND_QTY_DETERMINATION", para, section_ref, anchors) do
+  defp extract_clause_fields("INSPECTION_AND_QTY_DETERMINATION", para, section_ref, anchors, _product_group) do
     inspector =
       cond do
         Regex.match?(~r/\bseller\b.*\bappoint\b/i, para) -> :seller_appoints
@@ -804,7 +808,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("DOCUMENTS_AND_CERTIFICATES", para, section_ref, anchors) do
+  defp extract_clause_fields("DOCUMENTS_AND_CERTIFICATES", para, section_ref, anchors, _product_group) do
     docs = []
     docs = if Regex.match?(~r/\bcertificate\s+of\s+origin\b/i, para), do: [:certificate_of_origin | docs], else: docs
     docs = if Regex.match?(~r/\bEUR\s*1\b/i, para), do: [:eur1 | docs], else: docs
@@ -825,7 +829,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("INSURANCE", para, section_ref, anchors) do
+  defp extract_clause_fields("INSURANCE", para, section_ref, anchors, _product_group) do
     who =
       cond do
         Regex.match?(~r/\bseller\b.*\b(?:insure|insurance|arrange)\b/i, para) -> :seller
@@ -849,7 +853,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("LOI", para, section_ref, anchors) do
+  defp extract_clause_fields("LOI", para, section_ref, anchors, _product_group) do
     bank_guarantee = Regex.match?(~r/\bbank\s+guarantee\b/i, para)
 
     {:ok, %Clause{
@@ -864,7 +868,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("TAXES_FEES_DUES", para, section_ref, anchors) do
+  defp extract_clause_fields("TAXES_FEES_DUES", para, section_ref, anchors, _product_group) do
     add_to_sale = Regex.match?(~r/\badded\s+to\s+the\s+sale\s+price\b/i, para)
     deduct_from_purchase = Regex.match?(~r/\bdeducted\s+from\s+the\s+purchase\s+price\b/i, para)
     vat = Regex.match?(~r/\bVAT\b/, para)
@@ -886,7 +890,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("EXPORT_IMPORT_REACH", para, section_ref, anchors) do
+  defp extract_clause_fields("EXPORT_IMPORT_REACH", para, section_ref, anchors, _product_group) do
     reach = Regex.match?(~r/\bREACH\b/, para)
     sds = Regex.match?(~r/\bSafety\s+Data\s+Sheet\b/i, para)
 
@@ -902,7 +906,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("WAR_RISK_AND_ROUTE_CLOSURE", para, section_ref, anchors) do
+  defp extract_clause_fields("WAR_RISK_AND_ROUTE_CLOSURE", para, section_ref, anchors, _product_group) do
     jwc = Regex.match?(~r/\bJoint\s+War\s+Committee\b/i, para)
     route_closure = Regex.match?(~r/\bMain\s+Shipping\s+Routes?\s+Closure\b/i, para)
 
@@ -922,7 +926,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("FORCE_MAJEURE", para, section_ref, anchors) do
+  defp extract_clause_fields("FORCE_MAJEURE", para, section_ref, anchors, _product_group) do
     notice_days = extract_field_value(para, ~r/(\d+)\s*(?:business\s+|calendar\s+)?days?\s*(?:notice|notify)/i)
     demurrage_interaction = Regex.match?(~r/\bdemurrage\b/i, para)
 
@@ -942,7 +946,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("DEFAULT_AND_REMEDIES", para, section_ref, anchors) do
+  defp extract_clause_fields("DEFAULT_AND_REMEDIES", para, section_ref, anchors, _product_group) do
     cure_hours = extract_field_value(para, ~r/(\d+)\s*hours?\s*/i)
     interest_rate = extract_field_value(para, ~r/([\d.]+)\s*%\s*(?:per\s+annum|interest)/i)
     setoff = Regex.match?(~r/\bsetoff\b|\bset-off\b|\bnetting\b/i, para)
@@ -963,7 +967,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("WARRANTY_DISCLAIMER", para, section_ref, anchors) do
+  defp extract_clause_fields("WARRANTY_DISCLAIMER", para, section_ref, anchors, _product_group) do
     {:ok, %Clause{
       clause_id: "WARRANTY_DISCLAIMER",
       type: :legal,
@@ -976,7 +980,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("CLAIMS_NOTICE_AND_LIMITS", para, section_ref, anchors) do
+  defp extract_clause_fields("CLAIMS_NOTICE_AND_LIMITS", para, section_ref, anchors, _product_group) do
     notice_deadline = extract_field_value(para, ~r/(\d+)\s*(?:calendar\s+)?days?\s*/i)
 
     limitation =
@@ -1003,7 +1007,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("GOVERNING_LAW_AND_ARBITRATION", para, section_ref, anchors) do
+  defp extract_clause_fields("GOVERNING_LAW_AND_ARBITRATION", para, section_ref, anchors, _product_group) do
     law =
       cond do
         Regex.match?(~r/\bEnglish\s+law\b/i, para) -> :english
@@ -1032,7 +1036,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("HARDSHIP_AND_REPRESENTATIONS", para, section_ref, anchors) do
+  defp extract_clause_fields("HARDSHIP_AND_REPRESENTATIONS", para, section_ref, anchors, _product_group) do
     {:ok, %Clause{
       clause_id: "HARDSHIP_AND_REPRESENTATIONS",
       type: :legal,
@@ -1048,7 +1052,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("NOTICES", para, section_ref, anchors) do
+  defp extract_clause_fields("NOTICES", para, section_ref, anchors, _product_group) do
     methods = []
     methods = if Regex.match?(~r/\bcourier\b/i, para), do: [:courier | methods], else: methods
     methods = if Regex.match?(~r/\bfax\b/i, para), do: [:fax | methods], else: methods
@@ -1066,7 +1070,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
     }}
   end
 
-  defp extract_clause_fields("MISCELLANEOUS_BOILERPLATE", para, section_ref, anchors) do
+  defp extract_clause_fields("MISCELLANEOUS_BOILERPLATE", para, section_ref, anchors, _product_group) do
     {:ok, %Clause{
       clause_id: "MISCELLANEOUS_BOILERPLATE",
       type: :legal,
@@ -1080,7 +1084,7 @@ defmodule AmmoniaDesk.Contracts.Parser do
   end
 
   # Fallback for any unhandled clause_id
-  defp extract_clause_fields(clause_id, para, section_ref, anchors) do
+  defp extract_clause_fields(clause_id, para, section_ref, anchors, _product_group) do
     {:ok, %Clause{
       clause_id: clause_id,
       type: :condition,
@@ -1154,11 +1158,32 @@ defmodule AmmoniaDesk.Contracts.Parser do
     end
   end
 
-  defp extract_product_name(text) do
+  defp extract_product_name(text, product_group) do
+    frame = ProductGroup.frame(product_group)
+    patterns = (frame && frame[:product_patterns]) || []
+
+    matched =
+      Enum.find(patterns, fn pattern ->
+        Regex.match?(pattern, text)
+      end)
+
+    if matched do
+      (frame && frame[:product]) || extract_product_name_generic(text)
+    else
+      extract_product_name_generic(text)
+    end
+  end
+
+  defp extract_product_name_generic(text) do
     cond do
       Regex.match?(~r/\b[Aa]nhydrous\s+[Aa]mmonia\b/, text) -> "Anhydrous Ammonia"
       Regex.match?(~r/\bNH3\b/, text) -> "Anhydrous Ammonia (NH3)"
       Regex.match?(~r/\b[Aa]mmonia\b/, text) -> "Ammonia"
+      Regex.match?(~r/\b[Ss]ulph?ur\b/, text) -> "Sulphur"
+      Regex.match?(~r/\b[Pp]etroleum\s+[Cc]oke\b/, text) -> "Petroleum Coke"
+      Regex.match?(~r/\b[Pp]etcoke\b/i, text) -> "Petroleum Coke"
+      Regex.match?(~r/\b[Ss]ulph?uric\s+[Aa]cid\b/, text) -> "Sulphuric Acid"
+      Regex.match?(~r/\b[Uu]rea\b/, text) -> "Urea"
       true -> nil
     end
   end
@@ -1204,24 +1229,40 @@ defmodule AmmoniaDesk.Contracts.Parser do
   # PARAMETER DETECTION (maps to LP solver variables)
   # ──────────────────────────────────────────────────────────
 
-  defp detect_volume_parameter(lower) do
-    cond do
-      String.contains?(lower, "donaldsonville") or String.contains?(lower, "don ") -> :inv_don
-      String.contains?(lower, "geismar") or String.contains?(lower, "geis") -> :inv_geis
-      String.contains?(lower, "st. louis") or String.contains?(lower, "stl") -> :sell_stl
-      String.contains?(lower, "memphis") or String.contains?(lower, "mem") -> :sell_mem
-      true -> :total_volume
-    end
+  defp detect_volume_parameter(lower, product_group) do
+    frame = ProductGroup.frame(product_group)
+    location_anchors = (frame && frame[:location_anchors]) || %{}
+
+    # Try matching against the product group's location anchors
+    matched =
+      Enum.find_value(location_anchors, fn {location, param} ->
+        if String.contains?(lower, location), do: param
+      end)
+
+    matched || :total_volume
   end
 
-  defp detect_price_parameter(lower) do
-    cond do
-      String.contains?(lower, "buy") or String.contains?(lower, "purchase") -> :nola_buy
-      String.contains?(lower, "st. louis") or String.contains?(lower, "stl") -> :sell_stl
-      String.contains?(lower, "memphis") or String.contains?(lower, "mem") -> :sell_mem
-      String.contains?(lower, "natural gas") or String.contains?(lower, "henry hub") -> :nat_gas
-      String.contains?(lower, "sell") or String.contains?(lower, "sale") -> :contract_price
-      true -> :contract_price
+  defp detect_price_parameter(lower, product_group) do
+    frame = ProductGroup.frame(product_group)
+    price_anchors = (frame && frame[:price_anchors]) || %{}
+    location_anchors = (frame && frame[:location_anchors]) || %{}
+
+    # Try price anchors first (buy, purchase, natural gas, etc.)
+    price_match =
+      Enum.find_value(price_anchors, fn {anchor, param} ->
+        if param && String.contains?(lower, anchor), do: param
+      end)
+
+    if price_match do
+      price_match
+    else
+      # Fall back to location anchors
+      location_match =
+        Enum.find_value(location_anchors, fn {location, param} ->
+          if String.contains?(lower, location), do: param
+        end)
+
+      location_match || :contract_price
     end
   end
 

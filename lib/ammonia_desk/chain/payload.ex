@@ -13,30 +13,34 @@ defmodule AmmoniaDesk.Chain.Payload do
     - 0x04: AUTO_MC — server auto Monte Carlo triggered by delta threshold
     - 0x05: CONFIG_CHANGE — admin updates delta config
 
-  ## Binary Format
+  ## Binary Format (v2 — dynamic product groups)
 
     HEADER (8 bytes)
-      magic:          4B    "NH3\\x01" (ammonia protocol v1)
+      magic:          4B    product-group-specific (e.g. "NH3\\x01", "SUL\\x01")
       type:           1B    payload type (0x01-0x05)
-      product_group:  1B    0x01=ammonia, 0x02=uan, 0x03=urea
-      version:        1B    payload version (0x01)
-      flags:          1B    reserved
+      product_code:   1B    from ProductGroup.chain_product_code/1
+      version:        1B    payload version (0x02 for dynamic frames)
+      flags:          1B    bit 0 = dynamic variable count
 
     TIMESTAMP (8 bytes)
       unix_ms:        8B    u64-LE — milliseconds since epoch
 
-    VARIABLES (160 bytes)
-      20 × f64-LE: canonical variable order (same as Variables.to_binary/1)
+    VARIABLE_HEADER (2 bytes, when flags bit 0 set)
+      n_variables:    2B    u16-LE — number of variables that follow
+
+    VARIABLES (n × 8 bytes)
+      n × f64-LE: variables in frame-defined canonical order
 
     RESULT (varies by type)
       For SOLVE (type 0x01, 0x03):
+        n_routes:     1B    u8
         status:       1B    0x00=optimal, 0x01=infeasible, 0x02=error
         profit:       8B    f64-LE
         tons:         8B    f64-LE
         cost:         8B    f64-LE
         roi:          8B    f64-LE
-        route_tons:   32B   4 × f64-LE
-        margins:      32B   4 × f64-LE
+        route_tons:   R×8B  R × f64-LE
+        margins:      R×8B  R × f64-LE
 
       For MC (type 0x02, 0x04):
         signal:       1B    0x01=strong_go .. 0x05=no_go
@@ -44,23 +48,13 @@ defmodule AmmoniaDesk.Chain.Payload do
         n_feasible:   4B    u32-LE
         mean:         8B    f64-LE
         stddev:       8B    f64-LE
-        p5:           8B    f64-LE
-        p25:          8B    f64-LE
-        p50:          8B    f64-LE
-        p75:          8B    f64-LE
-        p95:          8B    f64-LE
-        min:          8B    f64-LE
-        max:          8B    f64-LE
+        p5-p95:       5×8B  f64-LE
+        min, max:     2×8B  f64-LE
 
     TRIGGER (only for types 0x03, 0x04 — auto-solve)
       triggered_mask: 4B    u32-LE bitmask (bit per variable)
       n_triggered:    1B    count of triggered variables
-      For each triggered variable (33 bytes each):
-        var_index:    1B    variable index (0-19)
-        baseline:     8B    f64-LE — value at last solve
-        current:      8B    f64-LE — value that triggered
-        threshold:    8B    f64-LE — configured threshold
-        delta:        8B    f64-LE — actual delta
+      Per trigger (33 bytes): var_index(1B), baseline(8B), current(8B), threshold(8B), delta(8B)
 
   Full payload is then:
     1. SHA-256 hashed → 32-byte digest
@@ -69,7 +63,7 @@ defmodule AmmoniaDesk.Chain.Payload do
     4. Stored in OP_RETURN
   """
 
-  @magic "NH3\x01"
+  alias AmmoniaDesk.ProductGroup
 
   # Payload types
   @type_solve_commit  0x01
@@ -77,11 +71,6 @@ defmodule AmmoniaDesk.Chain.Payload do
   @type_auto_solve    0x03
   @type_auto_mc       0x04
   @type_config_change 0x05
-
-  # Product group codes
-  @pg_ammonia 0x01
-  @pg_uan     0x02
-  @pg_urea    0x03
 
   # Signal codes
   @signal_strong_go 0x01
@@ -96,12 +85,12 @@ defmodule AmmoniaDesk.Chain.Payload do
     variables = opts[:variables]
     distribution = opts[:distribution]
     trigger_details = opts[:trigger_details] || []
-    product_group = opts[:product_group] || :ammonia
+    product_group = opts[:product_group] || :ammonia_domestic
     timestamp = opts[:timestamp] || DateTime.utc_now()
 
     header = serialize_header(@type_auto_mc, product_group)
     ts = serialize_timestamp(timestamp)
-    vars = AmmoniaDesk.Variables.to_binary(variables)
+    vars = serialize_variables(variables, product_group)
     result = serialize_mc_result(distribution)
     trigger = serialize_trigger_section(trigger_details)
 
@@ -114,13 +103,13 @@ defmodule AmmoniaDesk.Chain.Payload do
     variables = opts[:variables]
     result_data = opts[:result]
     trigger_details = opts[:trigger_details] || []
-    product_group = opts[:product_group] || :ammonia
+    product_group = opts[:product_group] || :ammonia_domestic
     timestamp = opts[:timestamp] || DateTime.utc_now()
 
     header = serialize_header(@type_auto_solve, product_group)
     ts = serialize_timestamp(timestamp)
-    vars = AmmoniaDesk.Variables.to_binary(variables)
-    result = serialize_solve_result(result_data)
+    vars = serialize_variables(variables, product_group)
+    result = serialize_solve_result(result_data, product_group)
     trigger = serialize_trigger_section(trigger_details)
 
     header <> ts <> vars <> result <> trigger
@@ -131,13 +120,13 @@ defmodule AmmoniaDesk.Chain.Payload do
   def serialize_solve_commit(opts) do
     variables = opts[:variables]
     result_data = opts[:result]
-    product_group = opts[:product_group] || :ammonia
+    product_group = opts[:product_group] || :ammonia_domestic
     timestamp = opts[:timestamp] || DateTime.utc_now()
 
     header = serialize_header(@type_solve_commit, product_group)
     ts = serialize_timestamp(timestamp)
-    vars = AmmoniaDesk.Variables.to_binary(variables)
-    result = serialize_solve_result(result_data)
+    vars = serialize_variables(variables, product_group)
+    result = serialize_solve_result(result_data, product_group)
 
     header <> ts <> vars <> result
   end
@@ -147,12 +136,12 @@ defmodule AmmoniaDesk.Chain.Payload do
   def serialize_mc_commit(opts) do
     variables = opts[:variables]
     distribution = opts[:distribution]
-    product_group = opts[:product_group] || :ammonia
+    product_group = opts[:product_group] || :ammonia_domestic
     timestamp = opts[:timestamp] || DateTime.utc_now()
 
     header = serialize_header(@type_mc_commit, product_group)
     ts = serialize_timestamp(timestamp)
-    vars = AmmoniaDesk.Variables.to_binary(variables)
+    vars = serialize_variables(variables, product_group)
     result = serialize_mc_result(distribution)
 
     header <> ts <> vars <> result
@@ -161,7 +150,7 @@ defmodule AmmoniaDesk.Chain.Payload do
   @doc "Serialize a config change to canonical binary."
   @spec serialize_config_change(map()) :: binary()
   def serialize_config_change(opts) do
-    product_group = opts[:product_group] || :ammonia
+    product_group = opts[:product_group] || :ammonia_domestic
     timestamp = opts[:timestamp] || DateTime.utc_now()
     config_json = Jason.encode!(opts[:config] || %{})
 
@@ -204,14 +193,11 @@ defmodule AmmoniaDesk.Chain.Payload do
   # ──────────────────────────────────────────────────────────
 
   defp serialize_header(type, product_group) do
-    pg_code = case product_group do
-      :ammonia -> @pg_ammonia
-      :uan -> @pg_uan
-      :urea -> @pg_urea
-      _ -> @pg_ammonia
-    end
+    magic = ProductGroup.chain_magic(product_group)
+    pg_code = ProductGroup.chain_product_code(product_group)
 
-    <<@magic::binary, type::8, pg_code::8, 0x01::8, 0x00::8>>
+    # flags bit 0 = dynamic variable count (v2 format)
+    <<magic::binary, type::8, pg_code::8, 0x02::8, 0x01::8>>
   end
 
   defp serialize_timestamp(datetime) do
@@ -219,7 +205,22 @@ defmodule AmmoniaDesk.Chain.Payload do
     <<unix_ms::little-64>>
   end
 
-  defp serialize_solve_result(result) when is_map(result) do
+  # Serialize variables using dynamic frame or legacy struct
+  defp serialize_variables(%AmmoniaDesk.Variables{} = vars, _product_group) do
+    binary = AmmoniaDesk.Variables.to_binary(vars)
+    n = div(byte_size(binary), 8)
+    <<n::little-16>> <> binary
+  end
+
+  defp serialize_variables(vars, product_group) when is_map(vars) do
+    binary = AmmoniaDesk.VariablesDynamic.to_binary(vars, product_group)
+    n = div(byte_size(binary), 8)
+    <<n::little-16>> <> binary
+  end
+
+  defp serialize_variables(_, _), do: <<0::little-16>>
+
+  defp serialize_solve_result(result, product_group) when is_map(result) do
     status = case Map.get(result, :status) do
       :optimal -> 0x00
       :infeasible -> 0x01
@@ -231,20 +232,22 @@ defmodule AmmoniaDesk.Chain.Payload do
     cost = to_f64(result[:cost])
     roi = to_f64(result[:roi])
 
-    route_tons = result[:route_tons] || [0, 0, 0, 0]
-    margins = result[:margins] || [0, 0, 0, 0]
+    route_count = ProductGroup.route_count(product_group)
+    route_tons = result[:route_tons] || []
+    margins = result[:margins] || []
 
     <<
+      route_count::8,
       status::8,
       profit::float-little-64,
       tons::float-little-64,
       cost::float-little-64,
       roi::float-little-64,
-      serialize_f64_array(route_tons, 4)::binary,
-      serialize_f64_array(margins, 4)::binary
+      serialize_f64_array(route_tons, route_count)::binary,
+      serialize_f64_array(margins, route_count)::binary
     >>
   end
-  defp serialize_solve_result(_), do: <<0x02::8, 0::float-little-64>>
+  defp serialize_solve_result(_, _), do: <<0::8, 0x02::8, 0::float-little-64>>
 
   defp serialize_mc_result(dist) when is_map(dist) do
     signal = case Map.get(dist, :signal) do

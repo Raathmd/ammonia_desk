@@ -1,14 +1,16 @@
 defmodule AmmoniaDesk.ScenarioLive do
   @moduledoc """
-  Interactive scenario desk for ammonia barge traders.
-  
+  Interactive scenario desk for commodity traders.
+
+  Supports all product groups (ammonia domestic, sulphur international,
+  petcoke, ammonia international, etc.) with frame-driven UI that
+  dynamically renders variables, routes, and constraints from the
+  ProductGroup registry.
+
   Two modes:
     - SOLVE: tweak variables, get instant result
-    - MONTE CARLO: run 1000 scenarios around current values
-  
-  All 18 variables shown with live API values.
-  Trader can override any variable, then reset to live.
-  
+    - MONTE CARLO: run N scenarios around current values
+
   Two tabs:
     - TRADER: Manual scenario exploration with solve and Monte Carlo
     - AGENT: Automated agent monitoring with delta-based triggering
@@ -20,9 +22,7 @@ defmodule AmmoniaDesk.ScenarioLive do
   alias AmmoniaDesk.Solver.Pipeline
   alias AmmoniaDesk.Data.LiveState
   alias AmmoniaDesk.Scenarios.Store
-
-  @route_names ["Don→StL", "Don→Mem", "Geis→StL", "Geis→Mem"]
-  @constraint_names ["Supply Don", "Supply Geis", "StL Capacity", "Mem Capacity", "Fleet", "Working Cap"]
+  alias AmmoniaDesk.ProductGroup
 
   @impl true
   def mount(_params, _session, socket) do
@@ -32,6 +32,7 @@ defmodule AmmoniaDesk.ScenarioLive do
       Phoenix.PubSub.subscribe(AmmoniaDesk.PubSub, "solve_pipeline")
     end
 
+    product_group = :ammonia_domestic
     live_vars = LiveState.get()
     auto_result = AmmoniaDesk.Scenarios.AutoRunner.latest()
 
@@ -39,8 +40,18 @@ defmodule AmmoniaDesk.ScenarioLive do
     vessel_data = LiveState.get_supplementary(:vessel_tracking)
     tides_data = LiveState.get_supplementary(:tides)
 
+    # Load frame-driven metadata
+    frame = ProductGroup.frame(product_group)
+    metadata = ProductGroup.variable_metadata(product_group)
+    route_names = ProductGroup.route_names(product_group)
+    constraint_names = ProductGroup.constraint_names(product_group)
+    variable_groups = AmmoniaDesk.VariablesDynamic.groups(product_group)
+    available_groups = ProductGroup.list_with_info()
+
     socket =
       socket
+      |> assign(:product_group, product_group)
+      |> assign(:frame, frame)
       |> assign(:live_vars, live_vars)
       |> assign(:current_vars, live_vars)
       |> assign(:overrides, MapSet.new())
@@ -49,9 +60,11 @@ defmodule AmmoniaDesk.ScenarioLive do
       |> assign(:auto_result, auto_result)
       |> assign(:saved_scenarios, Store.list("trader_1"))
       |> assign(:trader_id, "trader_1")
-      |> assign(:metadata, Variables.metadata())
-      |> assign(:route_names, @route_names)
-      |> assign(:constraint_names, @constraint_names)
+      |> assign(:metadata, metadata)
+      |> assign(:route_names, route_names)
+      |> assign(:constraint_names, constraint_names)
+      |> assign(:variable_groups, variable_groups)
+      |> assign(:available_groups, available_groups)
       |> assign(:solving, false)
       |> assign(:active_tab, :trader)
       |> assign(:agent_history, [])
@@ -182,6 +195,39 @@ defmodule AmmoniaDesk.ScenarioLive do
   end
 
   @impl true
+  def handle_event("switch_product_group", %{"group" => group}, socket) do
+    pg = String.to_existing_atom(group)
+    frame = ProductGroup.frame(pg)
+
+    if frame do
+      metadata = ProductGroup.variable_metadata(pg)
+      route_names = ProductGroup.route_names(pg)
+      constraint_names = ProductGroup.constraint_names(pg)
+      variable_groups = AmmoniaDesk.VariablesDynamic.groups(pg)
+      default_vars = ProductGroup.default_values(pg)
+
+      socket =
+        socket
+        |> assign(:product_group, pg)
+        |> assign(:frame, frame)
+        |> assign(:metadata, metadata)
+        |> assign(:route_names, route_names)
+        |> assign(:constraint_names, constraint_names)
+        |> assign(:variable_groups, variable_groups)
+        |> assign(:current_vars, default_vars)
+        |> assign(:live_vars, default_vars)
+        |> assign(:overrides, MapSet.new())
+        |> assign(:result, nil)
+        |> assign(:distribution, nil)
+        |> assign(:explanation, nil)
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
   def handle_event("switch_tab", %{"tab" => tab}, socket) do
     tab_atom = String.to_existing_atom(tab)
     socket = assign(socket, :active_tab, tab_atom)
@@ -203,16 +249,18 @@ defmodule AmmoniaDesk.ScenarioLive do
   @impl true
   def handle_info(:do_solve, socket) do
     vars = socket.assigns.current_vars
+    pg = socket.assigns.product_group
     # Pipeline: check contracts → ingest changes → solve
-    Pipeline.solve_async(vars, product_group: :ammonia, caller_ref: :trader_solve)
+    Pipeline.solve_async(vars, product_group: pg, caller_ref: :trader_solve)
     {:noreply, socket}
   end
 
   @impl true
   def handle_info(:do_monte_carlo, socket) do
     vars = socket.assigns.current_vars
+    pg = socket.assigns.product_group
     # Pipeline: check contracts → ingest changes → monte carlo
-    Pipeline.monte_carlo_async(vars, product_group: :ammonia, caller_ref: :trader_mc)
+    Pipeline.monte_carlo_async(vars, product_group: pg, caller_ref: :trader_mc)
     {:noreply, socket}
   end
 
@@ -369,7 +417,13 @@ defmodule AmmoniaDesk.ScenarioLive do
       <div style="background:#0d1117;border-bottom:1px solid #1b2838;padding:10px 20px;display:flex;justify-content:space-between;align-items:center">
         <div style="display:flex;align-items:center;gap:12px">
           <div style={"width:8px;height:8px;border-radius:50%;background:#{if @auto_result, do: "#10b981", else: "#64748b"};box-shadow:0 0 8px #{if @auto_result, do: "#10b981", else: "transparent"}"}></div>
-          <span style="font-size:14px;font-weight:700;color:#e2e8f0;letter-spacing:1px">AMMONIA BARGE SCENARIO DESK</span>
+          <span style="font-size:14px;font-weight:700;color:#e2e8f0;letter-spacing:1px"><%= (@frame && @frame[:name]) || "SCENARIO DESK" %></span>
+          <select phx-change="switch_product_group" name="group"
+            style="background:#111827;border:1px solid #1e293b;color:#94a3b8;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;cursor:pointer">
+            <%= for pg <- @available_groups do %>
+              <option value={pg.id} selected={pg.id == @product_group}><%= pg.name %></option>
+            <% end %>
+          </select>
           <a href="/contracts" style="color:#a78bfa;text-decoration:none;font-size:11px;font-weight:600;padding:4px 10px;border:1px solid #1e293b;border-radius:4px">CONTRACTS</a>
         </div>
         <div style="display:flex;align-items:center;gap:16px;font-size:12px">
@@ -389,7 +443,7 @@ defmodule AmmoniaDesk.ScenarioLive do
       <div style="display:grid;grid-template-columns:400px 1fr;height:calc(100vh - 45px)">
         <%# === LEFT: VARIABLES === %>
         <div style="background:#0a0f18;border-right:1px solid #1b2838;overflow-y:auto;padding:14px">
-          <%= for group <- [:environment, :operations, :commercial] do %>
+          <%= for group <- @variable_groups do %>
             <div style="margin-bottom:14px">
               <div style="display:flex;justify-content:space-between;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #1b283833">
                 <span style={"font-size:11px;font-weight:700;color:#{group_color(group)};letter-spacing:1.2px;text-transform:uppercase"}>
@@ -904,17 +958,17 @@ defmodule AmmoniaDesk.ScenarioLive do
   end
 
   defp sensitivity_label(key) do
-    labels = %{
-      river_stage: "River Stage", lock_hrs: "Lock Delays", temp_f: "Temperature",
-      wind_mph: "Wind Speed", vis_mi: "Visibility", precip_in: "Precipitation",
-      inv_don: "Don. Inventory", inv_geis: "Geis. Inventory",
-      stl_outage: "StL Outage", mem_outage: "Mem Outage", barge_count: "Barge Count",
-      nola_buy: "NH3 Buy Price", sell_stl: "StL Sell Price", sell_mem: "Mem Sell Price",
-      fr_don_stl: "Fr Don→StL", fr_don_mem: "Fr Don→Mem",
-      fr_geis_stl: "Fr Geis→StL", fr_geis_mem: "Fr Geis→Mem",
-      nat_gas: "Nat Gas", working_cap: "Working Capital"
-    }
-    Map.get(labels, key, to_string(key))
+    # Try all registered product groups for label lookup
+    label =
+      ProductGroup.list()
+      |> Enum.find_value(fn pg ->
+        ProductGroup.variables(pg)
+        |> Enum.find_value(fn v ->
+          if v[:key] == key, do: v[:label]
+        end)
+      end)
+
+    label || key |> to_string() |> String.replace("_", " ") |> String.capitalize()
   end
 
   defp trigger_label(:startup), do: "startup"
@@ -957,13 +1011,24 @@ defmodule AmmoniaDesk.ScenarioLive do
   defp group_color(:environment), do: "#38bdf8"
   defp group_color(:operations), do: "#a78bfa"
   defp group_color(:commercial), do: "#34d399"
+  defp group_color(:market), do: "#34d399"
+  defp group_color(:freight), do: "#f59e0b"
+  defp group_color(:macro), do: "#818cf8"
+  defp group_color(:quality), do: "#fb923c"
+  defp group_color(_), do: "#94a3b8"
 
-  defp group_icon(:environment), do: "🌊"
-  defp group_icon(:operations), do: "⚙️"
-  defp group_icon(:commercial), do: "💰"
+  defp group_icon(:environment), do: "~"
+  defp group_icon(:operations), do: "*"
+  defp group_icon(:commercial), do: "$"
+  defp group_icon(:market), do: "$"
+  defp group_icon(:freight), do: ">"
+  defp group_icon(:macro), do: "#"
+  defp group_icon(:quality), do: "?"
+  defp group_icon(_), do: "-"
 
-  defp format_var(%{key: :working_cap}, val), do: "$#{format_number(val)}"
-  defp format_var(%{unit: unit, key: key}, val) when key in [:nat_gas, :river_stage, :vis_mi] do
+  defp format_var(%{unit: "$"}, val), do: "$#{format_number(val)}"
+  defp format_var(%{unit: "$M"}, val), do: "$#{format_number(val)}M"
+  defp format_var(%{step: step, unit: unit}, val) when is_float(val) and is_float(step) and step < 1 do
     "#{Float.round(val, 1)} #{unit}"
   end
   defp format_var(%{unit: unit}, val) when is_float(val), do: "#{round(val)} #{unit}"
@@ -981,9 +1046,8 @@ defmodule AmmoniaDesk.ScenarioLive do
   end
   defp format_number(val), do: to_string(val)
 
-  defp parse_value(key, value) when key in [:stl_outage, :mem_outage] do
-    value == "true" or value == "1"
-  end
+  defp parse_value(_key, "true"), do: true
+  defp parse_value(_key, "false"), do: false
   defp parse_value(_key, value) when is_binary(value) do
     case Float.parse(value) do
       {f, _} -> f

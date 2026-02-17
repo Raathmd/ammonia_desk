@@ -16,6 +16,7 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
   """
 
   alias AmmoniaDesk.Contracts.{Contract, TemplateRegistry}
+  alias AmmoniaDesk.ProductGroup
 
   require Logger
 
@@ -41,23 +42,28 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
     validated_at: DateTime.t()
   }
 
-  # Normal value ranges for sanity checks on LP-relevant parameters
-  @value_ranges %{
-    nola_buy: {100.0, 1200.0},
-    sell_stl: {100.0, 1500.0},
-    sell_mem: {100.0, 1500.0},
-    fr_don_stl: {5.0, 200.0},
-    fr_don_mem: {5.0, 200.0},
-    fr_geis_stl: {5.0, 200.0},
-    fr_geis_mem: {5.0, 200.0},
-    inv_don: {100.0, 100_000.0},
-    inv_geis: {100.0, 100_000.0},
-    barge_count: {1.0, 50.0},
-    working_cap: {10_000.0, 50_000_000.0},
-    nat_gas: {1.0, 20.0},
+  # Fallback value ranges for sanity checks when no frame is available
+  @fallback_value_ranges %{
     total_volume: {100.0, 500_000.0},
-    contract_price: {50.0, 2000.0}
+    contract_price: {50.0, 2000.0},
+    working_cap: {10_000.0, 50_000_000.0}
   }
+
+  # Build value ranges dynamically from a product group's frame
+  defp value_ranges_for(product_group) do
+    frame_vars = ProductGroup.variables(product_group)
+
+    if frame_vars == [] do
+      @fallback_value_ranges
+    else
+      frame_ranges =
+        Map.new(frame_vars, fn v ->
+          {v[:key], {v[:min] * 1.0, v[:max] * 1.0}}
+        end)
+
+      Map.merge(@fallback_value_ranges, frame_ranges)
+    end
+  end
 
   @doc """
   Validate a contract against its family template.
@@ -79,12 +85,13 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
       else
         clauses = contract.clauses || []
         extracted_ids = clauses |> Enum.map(& &1.clause_id) |> Enum.reject(&is_nil/1) |> MapSet.new()
+        pg = contract.product_group || :ammonia_domestic
 
         findings =
           []
           |> check_coverage(reqs, extracted_ids)
           |> check_low_confidence(clauses)
-          |> check_value_ranges(clauses)
+          |> check_value_ranges(clauses, pg)
           |> check_duplicate_conflicts(clauses)
 
         required_reqs = Enum.filter(reqs, &(&1.level == :required))
@@ -193,9 +200,11 @@ defmodule AmmoniaDesk.Contracts.TemplateValidator do
     end)
   end
 
-  defp check_value_ranges(findings, clauses) do
+  defp check_value_ranges(findings, clauses, product_group) do
+    ranges = value_ranges_for(product_group)
+
     Enum.reduce(clauses, findings, fn clause, acc ->
-      case Map.get(@value_ranges, clause.parameter) do
+      case Map.get(ranges, clause.parameter) do
         {min, max} when is_number(clause.value) ->
           cond do
             clause.value < min * 0.1 ->

@@ -170,19 +170,29 @@ defmodule AmmoniaDesk.Contracts.ConstraintBridge do
 
   # --- Variable access helpers ---
 
-  @solver_variables [
+  # Solver variables come from the product group frame config.
+  # For backward compatibility, also accept the ammonia_domestic hardcoded list.
+  @legacy_solver_variables [
     :river_stage, :lock_hrs, :temp_f, :wind_mph, :vis_mi, :precip_in,
     :inv_don, :inv_geis, :stl_outage, :mem_outage, :barge_count,
     :nola_buy, :sell_stl, :sell_mem, :fr_don_stl, :fr_don_mem,
     :fr_geis_stl, :fr_geis_mem, :nat_gas, :working_cap
   ]
 
-  defp get_variable(%Variables{} = vars, param) when param in @solver_variables do
+  defp get_variable(%Variables{} = vars, param) when param in @legacy_solver_variables do
+    Map.get(vars, param)
+  end
+  # Dynamic variable maps (any product group)
+  defp get_variable(vars, param) when is_map(vars) and is_atom(param) do
     Map.get(vars, param)
   end
   defp get_variable(_, _), do: nil
 
-  defp set_variable(%Variables{} = vars, param, value) when param in @solver_variables do
+  defp set_variable(%Variables{} = vars, param, value) when param in @legacy_solver_variables do
+    Map.put(vars, param, value)
+  end
+  # Dynamic variable maps (any product group)
+  defp set_variable(vars, param, value) when is_map(vars) and is_atom(param) do
     Map.put(vars, param, value)
   end
   defp set_variable(vars, _, _), do: vars
