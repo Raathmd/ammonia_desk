@@ -320,12 +320,12 @@ defmodule TradingDesk.ScenarioLive do
           {:ok, text} -> send(lv_pid, {:explanation_result, text})
           {:error, reason} ->
             Logger.warning("Analyst explain_solve failed: #{inspect(reason)}")
-            send(lv_pid, {:explanation_result, nil})
+            send(lv_pid, {:explanation_result, {:error, reason}})
         end
       rescue
         e ->
           Logger.error("Analyst explain_solve crashed: #{Exception.message(e)}")
-          send(lv_pid, {:explanation_result, nil})
+          send(lv_pid, {:explanation_result, {:error, Exception.message(e)}})
       end
     end)
     {:noreply, socket}
@@ -350,12 +350,12 @@ defmodule TradingDesk.ScenarioLive do
           {:ok, text} -> send(lv_pid, {:explanation_result, text})
           {:error, reason} ->
             Logger.warning("Analyst explain_distribution failed: #{inspect(reason)}")
-            send(lv_pid, {:explanation_result, nil})
+            send(lv_pid, {:explanation_result, {:error, reason}})
         end
       rescue
         e ->
           Logger.error("Analyst explain_distribution crashed: #{Exception.message(e)}")
-          send(lv_pid, {:explanation_result, nil})
+          send(lv_pid, {:explanation_result, {:error, Exception.message(e)}})
       end
     end)
     {:noreply, socket}
@@ -425,6 +425,11 @@ defmodule TradingDesk.ScenarioLive do
   end
 
   @impl true
+  def handle_info({:explanation_result, {:error, reason}}, socket) do
+    error_text = analyst_error_text(reason)
+    {:noreply, assign(socket, explanation: {:error, error_text}, explaining: false)}
+  end
+
   def handle_info({:explanation_result, text}, socket) do
     {:noreply, assign(socket, explanation: text, explaining: false)}
   end
@@ -679,10 +684,13 @@ defmodule TradingDesk.ScenarioLive do
                   <span style="font-size:10px;color:#475569">thinking...</span>
                 <% end %>
               </div>
-              <%= if @explanation do %>
-                <div style="font-size:13px;color:#c8d6e5;line-height:1.5"><%= @explanation %></div>
-              <% else %>
-                <div style="font-size:12px;color:#475569;font-style:italic">Run SOLVE or MONTE CARLO to get analysis</div>
+              <%= case @explanation do %>
+                <% {:error, err_text} -> %>
+                  <div style="font-size:12px;color:#f87171;line-height:1.5"><%= err_text %></div>
+                <% text when is_binary(text) -> %>
+                  <div style="font-size:13px;color:#c8d6e5;line-height:1.5"><%= text %></div>
+                <% _ -> %>
+                  <div style="font-size:12px;color:#475569;font-style:italic">Run SOLVE or MONTE CARLO to get analysis</div>
               <% end %>
             </div>
 
@@ -1191,6 +1199,12 @@ defmodule TradingDesk.ScenarioLive do
   defp parse_value(_key, value), do: value
 
   # --- Pipeline UI helpers ---
+
+  defp analyst_error_text(:no_api_key), do: "ANTHROPIC_API_KEY not set. Export it in your shell to enable analyst explanations."
+  defp analyst_error_text(:api_error), do: "Claude API returned an error. Check logs for details."
+  defp analyst_error_text(:request_failed), do: "Could not reach Claude API. Check network connectivity."
+  defp analyst_error_text(msg) when is_binary(msg), do: "Analyst crashed: #{msg}"
+  defp analyst_error_text(reason), do: "Analyst error: #{inspect(reason)}"
 
   defp pipeline_button_text(false, _, label), do: "⚡ #{label}"
   defp pipeline_button_text(true, :checking_contracts, _), do: "📋 CHECKING CONTRACTS..."

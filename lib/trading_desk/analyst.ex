@@ -17,17 +17,19 @@ defmodule TradingDesk.Analyst do
   Product group is read from `result.product_group`.
   """
   def explain_solve(variables, result) do
-    pg = result.product_group || :ammonia_domestic
+    pg = Map.get(result, :product_group) || :ammonia_domestic
     vars = to_var_map(variables)
     frame = ProductGroup.frame(pg)
 
     vars_text = format_variables(vars, frame)
     routes_text = format_routes(result, frame)
 
+    roi = Map.get(result, :roi) || 0.0
+
     prompt = """
-    You are a #{frame.product} trading analyst at a global commodities firm.
-    Product group: #{frame.name} (#{frame.geography}).
-    Transport: #{frame.transport_mode}.
+    You are a #{frame[:product]} trading analyst at a global commodities firm.
+    Product group: #{frame[:name]} (#{frame[:geography]}).
+    Transport: #{frame[:transport_mode]}.
 
     A trader just ran an optimization with these inputs:
 
@@ -37,11 +39,11 @@ defmodule TradingDesk.Analyst do
     #{routes_text}
 
     RESULT:
-    - Gross profit: $#{format_number(result.profit)}
-    - Total tons: #{format_number(result.tons)}
+    - Gross profit: $#{format_number(Map.get(result, :profit))}
+    - Total tons: #{format_number(Map.get(result, :tons))}
     - #{vessel_label(frame)}: #{format_vessels(result, frame)}
-    - ROI: #{Float.round(result.roi || 0.0, 1)}%
-    - Capital deployed: $#{format_number(result.cost)}
+    - ROI: #{Float.round(roi / 1, 1)}%
+    - Capital deployed: $#{format_number(Map.get(result, :cost))}
 
     Write a 2-3 sentence analyst note explaining WHY this result makes sense given the inputs.
     Focus on the key drivers (margins, constraints, or risks). Be concise and tactical.
@@ -57,27 +59,27 @@ defmodule TradingDesk.Analyst do
   Product group is read from `distribution.product_group`.
   """
   def explain_distribution(variables, distribution) do
-    pg = distribution.product_group || :ammonia_domestic
+    pg = Map.get(distribution, :product_group) || :ammonia_domestic
     vars = to_var_map(variables)
     frame = ProductGroup.frame(pg)
 
     vars_summary = format_variables_compact(vars, frame)
-    sensitivity_text = format_sensitivity(distribution.sensitivity)
+    sensitivity_text = format_sensitivity(Map.get(distribution, :sensitivity))
 
     prompt = """
-    You are a #{frame.product} trading analyst. Product: #{frame.name} (#{frame.geography}).
+    You are a #{frame[:product]} trading analyst. Product: #{frame[:name]} (#{frame[:geography]}).
 
-    A trader just ran #{distribution.n_scenarios} Monte Carlo scenarios with these center values:
+    A trader just ran #{Map.get(distribution, :n_scenarios)} Monte Carlo scenarios with these center values:
 
     #{vars_summary}
 
     DISTRIBUTION:
-    - #{distribution.n_feasible}/#{distribution.n_scenarios} scenarios feasible
-    - Mean: $#{format_number(distribution.mean)}
-    - VaR 5%: $#{format_number(distribution.p5)}
-    - P95: $#{format_number(distribution.p95)}
-    - Std dev: $#{format_number(distribution.stddev)}
-    - Signal: #{distribution.signal}#{sensitivity_text}
+    - #{Map.get(distribution, :n_feasible)}/#{Map.get(distribution, :n_scenarios)} scenarios feasible
+    - Mean: $#{format_number(Map.get(distribution, :mean))}
+    - VaR 5%: $#{format_number(Map.get(distribution, :p5))}
+    - P95: $#{format_number(Map.get(distribution, :p95))}
+    - Std dev: $#{format_number(Map.get(distribution, :stddev))}
+    - Signal: #{Map.get(distribution, :signal)}#{sensitivity_text}
 
     Write a 2-3 sentence analyst note interpreting this distribution and signal.
     What does the VaR/upside spread tell us? Should the trader proceed?
@@ -93,17 +95,18 @@ defmodule TradingDesk.Analyst do
   and `.product_group`.
   """
   def explain_agent(result) do
-    pg = result[:product_group] || result.distribution.product_group || :ammonia_domestic
-    center = to_var_map(result.center)
+    dist = Map.get(result, :distribution) || %{}
+    pg = result[:product_group] || Map.get(dist, :product_group) || :ammonia_domestic
+    center = to_var_map(Map.get(result, :center) || %{})
     frame = ProductGroup.frame(pg)
 
-    trigger_text = format_triggers(result.triggers)
+    trigger_text = format_triggers(Map.get(result, :triggers))
     vars_summary = format_variables_compact(center, frame)
-    sensitivity_text = format_sensitivity(result.distribution.sensitivity)
+    sensitivity_text = format_sensitivity(Map.get(dist, :sensitivity))
 
     prompt = """
-    You are an autonomous #{frame.product} trading agent analyst.
-    Product: #{frame.name} (#{frame.geography}).
+    You are an autonomous #{frame[:product]} trading agent analyst.
+    Product: #{frame[:name]} (#{frame[:geography]}).
 
     The agent just ran Monte Carlo on live market data:
 
@@ -113,10 +116,10 @@ defmodule TradingDesk.Analyst do
     #{vars_summary}
 
     AGENT RESULT:
-    - Signal: #{result.distribution.signal}
-    - Mean: $#{format_number(result.distribution.mean)}
-    - VaR 5%: $#{format_number(result.distribution.p5)}
-    - #{result.distribution.n_feasible}/#{result.distribution.n_scenarios} feasible#{sensitivity_text}
+    - Signal: #{Map.get(dist, :signal)}
+    - Mean: $#{format_number(Map.get(dist, :mean))}
+    - VaR 5%: $#{format_number(Map.get(dist, :p5))}
+    - #{Map.get(dist, :n_feasible)}/#{Map.get(dist, :n_scenarios)} feasible#{sensitivity_text}
 
     Write 2-3 sentences explaining what the agent sees and why it gave this signal.
     What changed? What's the agent watching?
@@ -128,26 +131,26 @@ defmodule TradingDesk.Analyst do
   # ── Variable formatting ─────────────────────────────────────
 
   defp format_variables(vars, frame) do
-    frame.variables
-    |> Enum.group_by(& &1.group)
+    (frame[:variables] || [])
+    |> Enum.group_by(& &1[:group])
     |> Enum.map_join("\n\n", fn {group, var_defs} ->
       header = group |> to_string() |> String.upcase()
       lines = Enum.map_join(var_defs, "\n", fn v ->
-        val = Map.get(vars, v.key)
-        "- #{v.label}: #{format_var_value(val, v)}"
+        val = Map.get(vars, v[:key])
+        "- #{v[:label]}: #{format_var_value(val, v)}"
       end)
       "#{header}:\n#{lines}"
     end)
   end
 
   defp format_variables_compact(vars, frame) do
-    frame.variables
-    |> Enum.group_by(& &1.group)
+    (frame[:variables] || [])
+    |> Enum.group_by(& &1[:group])
     |> Enum.map_join("\n", fn {group, var_defs} ->
       header = group |> to_string() |> String.upcase()
       items = Enum.map_join(var_defs, ", ", fn v ->
-        val = Map.get(vars, v.key)
-        "#{v.label} #{format_var_value_short(val, v)}"
+        val = Map.get(vars, v[:key])
+        "#{v[:label]} #{format_var_value_short(val, v)}"
       end)
       "#{header}: #{items}"
     end)
@@ -158,12 +161,12 @@ defmodule TradingDesk.Analyst do
   end
 
   defp format_var_value(val, v) when is_float(val) do
-    unit = if v[:unit] && v[:unit] != "", do: " #{v.unit}", else: ""
+    unit = if v[:unit] && v[:unit] != "", do: " #{v[:unit]}", else: ""
     if abs(val) >= 1000, do: "#{format_number(val)}#{unit}", else: "#{Float.round(val, 1)}#{unit}"
   end
 
   defp format_var_value(val, v) when is_number(val) do
-    unit = if v[:unit] && v[:unit] != "", do: " #{v.unit}", else: ""
+    unit = if v[:unit] && v[:unit] != "", do: " #{v[:unit]}", else: ""
     "#{val}#{unit}"
   end
 
@@ -174,7 +177,7 @@ defmodule TradingDesk.Analyst do
   end
 
   defp format_var_value_short(val, v) when is_number(val) do
-    unit = if v[:unit] && v[:unit] != "", do: v.unit, else: ""
+    unit = if v[:unit] && v[:unit] != "", do: v[:unit], else: ""
 
     formatted =
       cond do
@@ -192,23 +195,23 @@ defmodule TradingDesk.Analyst do
   # ── Route formatting ────────────────────────────────────────
 
   defp format_routes(result, frame) do
-    routes = frame.routes
-    route_tons = result.route_tons || []
-    margins = result.margins || []
+    routes = frame[:routes] || []
+    route_tons = Map.get(result, :route_tons) || []
+    margins = Map.get(result, :margins) || []
 
     routes
     |> Enum.with_index()
     |> Enum.map_join("\n", fn {route, i} ->
       tons = Enum.at(route_tons, i, 0.0)
       margin = Enum.at(margins, i, 0.0)
-      "- #{route.name}: #{format_number(tons)} tons, margin $#{Float.round(margin, 1)}/t"
+      "- #{route[:name] || "Route #{i + 1}"}: #{format_number(tons)} tons, margin $#{Float.round(margin / 1, 1)}/t"
     end)
   end
 
   # ── Result formatting ───────────────────────────────────────
 
   defp vessel_label(frame) do
-    case frame.transport_mode do
+    case frame[:transport_mode] do
       :barge -> "Barges used"
       :ocean_vessel -> "Vessels used"
       _ -> "Units used"
@@ -216,7 +219,7 @@ defmodule TradingDesk.Analyst do
   end
 
   defp format_vessels(result, _frame) do
-    case result.barges do
+    case Map.get(result, :barges) do
       nil -> "N/A"
       b when is_float(b) -> Float.round(b, 1)
       b -> b
@@ -262,7 +265,7 @@ defmodule TradingDesk.Analyst do
   defp call_claude(prompt) do
     api_key = System.get_env("ANTHROPIC_API_KEY")
 
-    if is_nil(api_key) do
+    if is_nil(api_key) or api_key == "" do
       Logger.warning("ANTHROPIC_API_KEY not set, skipping analyst explanation")
       {:error, :no_api_key}
     else
@@ -274,15 +277,17 @@ defmodule TradingDesk.Analyst do
         },
         headers: [
           {"x-api-key", api_key},
-          {"anthropic-version", "2023-06-01"}
+          {"anthropic-version", "2023-06-01"},
+          {"content-type", "application/json"}
         ],
-        receive_timeout: 10_000
+        receive_timeout: 15_000
       ) do
         {:ok, %{status: 200, body: %{"content" => [%{"text" => text} | _]}}} ->
           {:ok, String.trim(text)}
 
         {:ok, %{status: status, body: body}} ->
-          Logger.error("Claude API error #{status}: #{inspect(body)}")
+          error_msg = extract_api_error(body)
+          Logger.error("Claude API error #{status}: #{error_msg}")
           {:error, :api_error}
 
         {:error, reason} ->
@@ -291,6 +296,9 @@ defmodule TradingDesk.Analyst do
       end
     end
   end
+
+  defp extract_api_error(%{"error" => %{"message" => msg}}), do: msg
+  defp extract_api_error(body), do: inspect(body)
 
   defp format_number(val) when is_float(val) do
     val
