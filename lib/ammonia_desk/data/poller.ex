@@ -30,13 +30,15 @@ defmodule AmmoniaDesk.Data.Poller do
 
   # Default intervals used before DeltaConfig loads
   @fallback_intervals %{
-    usgs:     :timer.minutes(15),
-    noaa:     :timer.minutes(30),
-    usace:    :timer.minutes(30),
-    eia:      :timer.hours(1),
-    market:   :timer.minutes(30),
-    broker:   :timer.hours(1),
-    internal: :timer.minutes(5)
+    usgs:             :timer.minutes(15),
+    noaa:             :timer.minutes(30),
+    usace:            :timer.minutes(30),
+    eia:              :timer.hours(1),
+    market:           :timer.minutes(30),
+    broker:           :timer.hours(1),
+    internal:         :timer.minutes(5),
+    vessel_tracking:  :timer.minutes(10),
+    tides:            :timer.minutes(15)
   }
 
   # USGS gauge IDs for Mississippi River (kept for fallback)
@@ -198,6 +200,53 @@ defmodule AmmoniaDesk.Data.Poller do
     end
   end
 
+  defp poll_source(:vessel_tracking) do
+    case AmmoniaDesk.Data.VesselWeather.fetch_fleet_conditions() do
+      {:ok, data} ->
+        # Store full vessel/weather/tides data in LiveState as supplementary data
+        AmmoniaDesk.Data.LiveState.update_supplementary(:vessel_tracking, data)
+
+        # Extract fleet weather to update solver variables (worst-case across fleet)
+        fleet_wx = data[:fleet_weather] || %{}
+        solver_updates = %{}
+          |> maybe_put(:wind_mph, fleet_wx[:wind_mph])
+          |> maybe_put(:vis_mi, fleet_wx[:vis_mi])
+          |> maybe_put(:temp_f, fleet_wx[:temp_f])
+
+        if map_size(solver_updates) > 0 do
+          {:ok, solver_updates}
+        else
+          {:ok, %{}}
+        end
+
+      {:error, _reason} ->
+        # Try vessel tracking alone without weather enrichment
+        case API.VesselTracking.fetch() do
+          {:ok, data} ->
+            AmmoniaDesk.Data.LiveState.update_supplementary(:vessel_tracking, data)
+            {:ok, %{}}
+
+          {:error, reason} ->
+            Logger.debug("Poller: vessel tracking unavailable: #{inspect(reason)}")
+            {:ok, %{}}
+        end
+    end
+  end
+
+  defp poll_source(:tides) do
+    case API.Tides.fetch() do
+      {:ok, data} ->
+        # Store full tidal data as supplementary
+        AmmoniaDesk.Data.LiveState.update_supplementary(:tides, data)
+
+        # Water level can supplement river stage near NOLA
+        {:ok, %{}}
+
+      {:error, _reason} ->
+        {:ok, %{}}
+    end
+  end
+
   # ──────────────────────────────────────────────────────────
   # FALLBACK PARSERS (from original implementation)
   # ──────────────────────────────────────────────────────────
@@ -293,6 +342,9 @@ defmodule AmmoniaDesk.Data.Poller do
       _ -> Map.get(@fallback_intervals, source, :timer.minutes(15))
     end
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp http_get(url) do
     case Req.get(url, receive_timeout: 15_000) do

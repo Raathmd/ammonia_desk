@@ -35,6 +35,10 @@ defmodule AmmoniaDesk.ScenarioLive do
     live_vars = LiveState.get()
     auto_result = AmmoniaDesk.Scenarios.AutoRunner.latest()
 
+    # Fetch supplementary data (vessels, tides)
+    vessel_data = LiveState.get_supplementary(:vessel_tracking)
+    tides_data = LiveState.get_supplementary(:tides)
+
     socket =
       socket
       |> assign(:live_vars, live_vars)
@@ -56,6 +60,8 @@ defmodule AmmoniaDesk.ScenarioLive do
       |> assign(:pipeline_phase, nil)
       |> assign(:pipeline_detail, nil)
       |> assign(:contracts_stale, false)
+      |> assign(:vessel_data, vessel_data)
+      |> assign(:tides_data, tides_data)
 
     {:ok, socket}
   end
@@ -311,6 +317,23 @@ defmodule AmmoniaDesk.ScenarioLive do
   end
 
   @impl true
+  def handle_info({:supplementary_updated, :vessel_tracking}, socket) do
+    vessel_data = LiveState.get_supplementary(:vessel_tracking)
+    {:noreply, assign(socket, :vessel_data, vessel_data)}
+  end
+
+  @impl true
+  def handle_info({:supplementary_updated, :tides}, socket) do
+    tides_data = LiveState.get_supplementary(:tides)
+    {:noreply, assign(socket, :tides_data, tides_data)}
+  end
+
+  @impl true
+  def handle_info({:supplementary_updated, _}, socket) do
+    {:noreply, socket}
+  end
+
+  @impl true
   def handle_info({:auto_result, result}, socket) do
     history = AmmoniaDesk.Scenarios.AutoRunner.history()
     socket =
@@ -418,6 +441,41 @@ defmodule AmmoniaDesk.ScenarioLive do
               <%= MapSet.size(@overrides) %> override<%= if MapSet.size(@overrides) != 1, do: "s", else: "" %> active
             </div>
           </div>
+
+          <%# === FLEET & TIDES COMPACT === %>
+          <%= if @vessel_data || @tides_data do %>
+            <div style="border-top:1px solid #1b2838;padding-top:10px;margin-top:10px">
+              <div style="font-size:10px;font-weight:700;color:#60a5fa;letter-spacing:1.2px;margin-bottom:6px">FLEET & TIDES</div>
+              <%= if @vessel_data && @vessel_data[:vessels] do %>
+                <div style="font-size:11px;color:#94a3b8;margin-bottom:4px">
+                  <%= length(@vessel_data[:vessels]) %> vessel<%= if length(@vessel_data[:vessels]) != 1, do: "s", else: "" %> tracked
+                </div>
+                <%= for vessel <- Enum.take(@vessel_data[:vessels] || [], 3) do %>
+                  <div style="display:flex;align-items:center;gap:6px;font-size:10px;padding:2px 0">
+                    <span style={"color:#{vessel_status_color(vessel[:status])}"}><%= vessel_status_icon(vessel[:direction]) %></span>
+                    <span style="color:#c8d6e5;font-weight:600;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= vessel[:name] || "Unknown" %></span>
+                    <span style="color:#64748b;font-size:9px">mi <%= vessel[:river_mile] || "?" %></span>
+                    <span style="color:#475569;font-size:9px"><%= vessel[:nearest_waypoint] || "" %></span>
+                  </div>
+                <% end %>
+              <% else %>
+                <div style="font-size:10px;color:#475569">No AIS data</div>
+              <% end %>
+              <%= if @tides_data do %>
+                <div style="display:flex;gap:8px;margin-top:4px;font-size:10px">
+                  <%= if @tides_data[:water_level_ft] do %>
+                    <span style="color:#60a5fa">WL: <%= Float.round(@tides_data[:water_level_ft], 1) %>ft</span>
+                  <% end %>
+                  <%= if @tides_data[:tidal_range_ft] do %>
+                    <span style="color:#818cf8">Range: <%= Float.round(@tides_data[:tidal_range_ft], 1) %>ft</span>
+                  <% end %>
+                  <%= if @tides_data[:current_speed_kn] do %>
+                    <span style="color:#38bdf8">Current: <%= Float.round(@tides_data[:current_speed_kn], 1) %>kn</span>
+                  <% end %>
+                </div>
+              <% end %>
+            </div>
+          <% end %>
         </div>
 
         <%# === RIGHT: TABS === %>
@@ -695,6 +753,122 @@ defmodule AmmoniaDesk.ScenarioLive do
                   <% end %>
                 </div>
               <% end %>
+
+              <%# === FLEET TRACKING === %>
+              <%= if @vessel_data && @vessel_data[:vessels] && length(@vessel_data[:vessels]) > 0 do %>
+                <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                    <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700">FLEET TRACKING</div>
+                    <div style="font-size:10px;color:#475569">
+                      <%= if @vessel_data[:fleet_summary] do %>
+                        <%= @vessel_data[:fleet_summary][:total_vessels] %> vessels
+                        — <%= @vessel_data[:fleet_summary][:underway] || 0 %> underway
+                      <% end %>
+                    </div>
+                  </div>
+                  <table style="width:100%;border-collapse:collapse;font-size:11px">
+                    <thead><tr style="border-bottom:1px solid #1e293b">
+                      <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Vessel</th>
+                      <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Near</th>
+                      <th style="text-align:right;padding:4px 6px;color:#64748b;font-size:10px">Mile</th>
+                      <th style="text-align:right;padding:4px 6px;color:#64748b;font-size:10px">Speed</th>
+                      <th style="text-align:center;padding:4px 6px;color:#64748b;font-size:10px">Dir</th>
+                      <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Status</th>
+                    </tr></thead>
+                    <tbody>
+                      <%= for vessel <- @vessel_data[:vessels] do %>
+                        <tr style="border-bottom:1px solid #1e293b11">
+                          <td style="padding:5px 6px;font-weight:600;color:#e2e8f0;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= vessel[:name] || "Unknown" %></td>
+                          <td style="padding:5px 6px;color:#94a3b8"><%= vessel[:nearest_waypoint] || "—" %></td>
+                          <td style="text-align:right;padding:5px 6px;font-family:monospace;color:#38bdf8"><%= vessel[:river_mile] || "—" %></td>
+                          <td style="text-align:right;padding:5px 6px;font-family:monospace;color:#c8d6e5"><%= if vessel[:speed], do: "#{Float.round(vessel[:speed], 1)}kn", else: "—" %></td>
+                          <td style="text-align:center;padding:5px 6px"><%= vessel_status_icon(vessel[:direction]) %></td>
+                          <td style={"padding:5px 6px;color:#{vessel_status_color(vessel[:status])};font-size:10px;font-weight:600"}><%= vessel_status_text(vessel[:status]) %></td>
+                        </tr>
+                      <% end %>
+                    </tbody>
+                  </table>
+                  <%# Fleet weather from vessel positions %>
+                  <%= if @vessel_data[:fleet_weather] && @vessel_data[:fleet_weather][:source] == :fleet_aggregate do %>
+                    <div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e293b">
+                      <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:4px">FLEET WEATHER (worst-case across positions)</div>
+                      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;font-size:11px">
+                        <%= if @vessel_data[:fleet_weather][:wind_mph] do %>
+                          <div style="background:#0a0f18;padding:6px;border-radius:4px">
+                            <div style="font-size:9px;color:#64748b">Wind</div>
+                            <div style="font-weight:700;color:#38bdf8;font-family:monospace"><%= Float.round(@vessel_data[:fleet_weather][:wind_mph], 0) %> mph</div>
+                          </div>
+                        <% end %>
+                        <%= if @vessel_data[:fleet_weather][:vis_mi] do %>
+                          <div style="background:#0a0f18;padding:6px;border-radius:4px">
+                            <div style="font-size:9px;color:#64748b">Visibility</div>
+                            <div style="font-weight:700;color:#38bdf8;font-family:monospace"><%= Float.round(@vessel_data[:fleet_weather][:vis_mi], 1) %> mi</div>
+                          </div>
+                        <% end %>
+                        <%= if @vessel_data[:fleet_weather][:temp_f] do %>
+                          <div style="background:#0a0f18;padding:6px;border-radius:4px">
+                            <div style="font-size:9px;color:#64748b">Temp</div>
+                            <div style="font-weight:700;color:#38bdf8;font-family:monospace"><%= Float.round(@vessel_data[:fleet_weather][:temp_f], 0) %>°F</div>
+                          </div>
+                        <% end %>
+                        <%= if @vessel_data[:fleet_weather][:precip_in] do %>
+                          <div style="background:#0a0f18;padding:6px;border-radius:4px">
+                            <div style="font-size:9px;color:#64748b">Precip</div>
+                            <div style="font-weight:700;color:#38bdf8;font-family:monospace"><%= Float.round(@vessel_data[:fleet_weather][:precip_in], 1) %> in</div>
+                          </div>
+                        <% end %>
+                      </div>
+                    </div>
+                  <% end %>
+                </div>
+              <% end %>
+
+              <%# === TIDES & CURRENTS === %>
+              <%= if @tides_data do %>
+                <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+                  <div style="font-size:10px;color:#818cf8;letter-spacing:1px;font-weight:700;margin-bottom:10px">TIDES & CURRENTS</div>
+                  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">
+                    <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                      <div style="font-size:9px;color:#64748b">Water Level</div>
+                      <div style="font-size:16px;font-weight:700;color:#60a5fa;font-family:monospace">
+                        <%= if @tides_data[:water_level_ft], do: "#{Float.round(@tides_data[:water_level_ft], 1)}ft", else: "—" %>
+                      </div>
+                      <div style="font-size:9px;color:#475569">Pilottown</div>
+                    </div>
+                    <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                      <div style="font-size:9px;color:#64748b">Tidal Range</div>
+                      <div style="font-size:16px;font-weight:700;color:#818cf8;font-family:monospace">
+                        <%= if @tides_data[:tidal_range_ft], do: "#{Float.round(@tides_data[:tidal_range_ft], 1)}ft", else: "—" %>
+                      </div>
+                      <div style="font-size:9px;color:#475569">24h predicted</div>
+                    </div>
+                    <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                      <div style="font-size:9px;color:#64748b">Current</div>
+                      <div style="font-size:16px;font-weight:700;color:#38bdf8;font-family:monospace">
+                        <%= if @tides_data[:current_speed_kn], do: "#{Float.round(@tides_data[:current_speed_kn], 1)}kn", else: "—" %>
+                      </div>
+                      <div style="font-size:9px;color:#475569">SW Pass</div>
+                    </div>
+                  </div>
+                  <%= if @tides_data[:nola_water_level_ft] do %>
+                    <div style="font-size:11px;color:#94a3b8;margin-bottom:4px">
+                      NOLA (New Canal): <span style="color:#60a5fa;font-weight:600;font-family:monospace"><%= Float.round(@tides_data[:nola_water_level_ft], 1) %>ft</span>
+                    </div>
+                  <% end %>
+                  <%= if @tides_data[:tidal_predictions] && @tides_data[:tidal_predictions][:next_high] do %>
+                    <div style="font-size:10px;color:#475569;margin-top:4px">
+                      Next high: <span style="color:#94a3b8"><%= @tides_data[:tidal_predictions][:next_high][:time] %></span>
+                      (<span style="color:#60a5fa"><%= Float.round(@tides_data[:tidal_predictions][:next_high][:level], 1) %>ft</span>)
+                    </div>
+                  <% end %>
+                  <%= if @tides_data[:tidal_predictions] && @tides_data[:tidal_predictions][:next_low] do %>
+                    <div style="font-size:10px;color:#475569">
+                      Next low: <span style="color:#94a3b8"><%= @tides_data[:tidal_predictions][:next_low][:time] %></span>
+                      (<span style="color:#f59e0b"><%= Float.round(@tides_data[:tidal_predictions][:next_low][:level], 1) %>ft</span>)
+                    </div>
+                  <% end %>
+                </div>
+              <% end %>
             <% else %>
               <div style="background:#111827;border-radius:10px;padding:40px;text-align:center;color:#475569">
                 Agent is initializing...
@@ -845,4 +1019,26 @@ defmodule AmmoniaDesk.ScenarioLive do
   defp pipeline_dot(:ingesting), do: "#f59e0b"
   defp pipeline_dot(:solving), do: "#10b981"
   defp pipeline_dot(_), do: "#64748b"
+
+  # --- Vessel tracking helpers ---
+
+  defp vessel_status_icon(:northbound), do: "^"
+  defp vessel_status_icon(:southbound), do: "v"
+  defp vessel_status_icon(_), do: "-"
+
+  defp vessel_status_color(:underway_engine), do: "#10b981"
+  defp vessel_status_color(:underway_sailing), do: "#34d399"
+  defp vessel_status_color(:at_anchor), do: "#f59e0b"
+  defp vessel_status_color(:moored), do: "#60a5fa"
+  defp vessel_status_color(:not_under_command), do: "#ef4444"
+  defp vessel_status_color(:restricted_maneuverability), do: "#fbbf24"
+  defp vessel_status_color(_), do: "#64748b"
+
+  defp vessel_status_text(:underway_engine), do: "UNDERWAY"
+  defp vessel_status_text(:underway_sailing), do: "SAILING"
+  defp vessel_status_text(:at_anchor), do: "ANCHOR"
+  defp vessel_status_text(:moored), do: "MOORED"
+  defp vessel_status_text(:not_under_command), do: "NUC"
+  defp vessel_status_text(:restricted_maneuverability), do: "RESTRICTED"
+  defp vessel_status_text(_), do: "UNKNOWN"
 end

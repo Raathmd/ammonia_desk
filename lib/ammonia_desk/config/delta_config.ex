@@ -45,13 +45,15 @@ defmodule AmmoniaDesk.Config.DeltaConfig do
 
       # Per-source poll intervals (ms)
       poll_intervals: %{
-        usgs:     :timer.minutes(15),
-        noaa:     :timer.minutes(30),
-        usace:    :timer.minutes(30),
-        eia:      :timer.hours(1),
-        market:   :timer.minutes(30),
-        broker:   :timer.hours(1),
-        internal: :timer.minutes(5)
+        usgs:             :timer.minutes(15),
+        noaa:             :timer.minutes(30),
+        usace:            :timer.minutes(30),
+        eia:              :timer.hours(1),
+        market:           :timer.minutes(30),
+        broker:           :timer.hours(1),
+        internal:         :timer.minutes(5),
+        vessel_tracking:  :timer.minutes(10),
+        tides:            :timer.minutes(15)
       },
 
       # Per-variable delta thresholds (absolute value)
@@ -90,13 +92,15 @@ defmodule AmmoniaDesk.Config.DeltaConfig do
       enabled: false,
       product_group: :uan,
       poll_intervals: %{
-        usgs:     :timer.minutes(15),
-        noaa:     :timer.minutes(30),
-        usace:    :timer.minutes(30),
-        eia:      :timer.hours(1),
-        market:   :timer.minutes(30),
-        broker:   :timer.hours(1),
-        internal: :timer.minutes(5)
+        usgs:             :timer.minutes(15),
+        noaa:             :timer.minutes(30),
+        usace:            :timer.minutes(30),
+        eia:              :timer.hours(1),
+        market:           :timer.minutes(30),
+        broker:           :timer.hours(1),
+        internal:         :timer.minutes(5),
+        vessel_tracking:  :timer.minutes(10),
+        tides:            :timer.minutes(15)
       },
       thresholds: %{
         river_stage: 0.5, lock_hrs: 2.0, temp_f: 5.0, wind_mph: 3.0,
@@ -114,13 +118,15 @@ defmodule AmmoniaDesk.Config.DeltaConfig do
       enabled: false,
       product_group: :urea,
       poll_intervals: %{
-        usgs:     :timer.minutes(15),
-        noaa:     :timer.minutes(30),
-        usace:    :timer.minutes(30),
-        eia:      :timer.hours(1),
-        market:   :timer.minutes(30),
-        broker:   :timer.hours(1),
-        internal: :timer.minutes(5)
+        usgs:             :timer.minutes(15),
+        noaa:             :timer.minutes(30),
+        usace:            :timer.minutes(30),
+        eia:              :timer.hours(1),
+        market:           :timer.minutes(30),
+        broker:           :timer.hours(1),
+        internal:         :timer.minutes(5),
+        vessel_tracking:  :timer.minutes(10),
+        tides:            :timer.minutes(15)
       },
       thresholds: %{
         river_stage: 0.5, lock_hrs: 2.0, temp_f: 5.0, wind_mph: 3.0,

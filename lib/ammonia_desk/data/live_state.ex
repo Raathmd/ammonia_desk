@@ -1,7 +1,17 @@
 defmodule AmmoniaDesk.Data.LiveState do
   @moduledoc """
-  Holds the current live values for all 18 variables.
+  Holds the current live values for all 18 solver variables plus supplementary
+  data (vessel positions, tides, fleet weather).
+
   Updated by the Poller, read by LiveView and AutoRunner.
+
+  ## Supplementary Data
+
+  In addition to the 18 solver variables, LiveState stores supplementary data
+  that doesn't directly map to solver inputs but is displayed in the UI:
+
+    - `:vessel_tracking` — vessel positions, fleet summary, vessel-proximate weather
+    - `:tides` — water levels, tidal predictions, currents from NOAA CO-OPS
   """
   use GenServer
 
@@ -24,6 +34,21 @@ defmodule AmmoniaDesk.Data.LiveState do
     GenServer.cast(__MODULE__, {:update, source, data})
   end
 
+  @doc "Get all supplementary data (vessel positions, tides, etc.)"
+  def get_supplementary do
+    GenServer.call(__MODULE__, :get_supplementary)
+  end
+
+  @doc "Get a specific supplementary data key."
+  def get_supplementary(key) do
+    GenServer.call(__MODULE__, {:get_supplementary, key})
+  end
+
+  @doc "Update supplementary data (non-variable data like vessel positions, tides)"
+  def update_supplementary(key, data) do
+    GenServer.cast(__MODULE__, {:update_supplementary, key, data})
+  end
+
   @impl true
   def init(_) do
     state = %{
@@ -36,7 +61,8 @@ defmodule AmmoniaDesk.Data.LiveState do
         fr_don_stl: 55.0, fr_don_mem: 32.0, fr_geis_stl: 58.0, fr_geis_mem: 34.0,
         nat_gas: 2.80, working_cap: 4_200_000.0
       },
-      updated_at: %{}
+      updated_at: %{},
+      supplementary: %{}
     }
     {:ok, state}
   end
@@ -52,10 +78,35 @@ defmodule AmmoniaDesk.Data.LiveState do
   end
 
   @impl true
+  def handle_call(:get_supplementary, _from, state) do
+    {:reply, state.supplementary, state}
+  end
+
+  @impl true
+  def handle_call({:get_supplementary, key}, _from, state) do
+    {:reply, Map.get(state.supplementary, key), state}
+  end
+
+  @impl true
   def handle_cast({:update, source, data}, state) do
     new_vars = merge_data(state.vars, data)
     new_updated = Map.put(state.updated_at, source, DateTime.utc_now())
     {:noreply, %{state | vars: new_vars, updated_at: new_updated}}
+  end
+
+  @impl true
+  def handle_cast({:update_supplementary, key, data}, state) do
+    new_supp = Map.put(state.supplementary, key, data)
+    new_updated = Map.put(state.updated_at, key, DateTime.utc_now())
+
+    # Broadcast supplementary data update
+    Phoenix.PubSub.broadcast(
+      AmmoniaDesk.PubSub,
+      "live_data",
+      {:supplementary_updated, key}
+    )
+
+    {:noreply, %{state | supplementary: new_supp, updated_at: new_updated}}
   end
 
   defp merge_data(vars, data) when is_map(data) do
