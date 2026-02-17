@@ -293,7 +293,21 @@ defmodule AmmoniaDesk.ScenarioLive do
   @impl true
   def handle_info({:data_updated, _source}, socket) do
     live = LiveState.get()
-    {:noreply, assign(socket, :live_vars, live)}
+
+    # Update non-overridden variables in current_vars so sliders track live API values
+    overrides = socket.assigns.overrides
+    current = socket.assigns.current_vars
+
+    updated_current =
+      Enum.reduce(Map.from_struct(live), current, fn {key, val}, acc ->
+        if MapSet.member?(overrides, key) do
+          acc  # Keep trader's override
+        else
+          Map.put(acc, key, val)  # Track live value
+        end
+      end)
+
+    {:noreply, assign(socket, live_vars: live, current_vars: updated_current)}
   end
 
   @impl true
@@ -735,12 +749,22 @@ defmodule AmmoniaDesk.ScenarioLive do
   defp trigger_label(:initial), do: "initial"
   defp trigger_label(key), do: sensitivity_label(key)
 
+  defp format_trigger(%{key: key, baseline_value: baseline, current_value: current, delta: delta, threshold: threshold}) do
+    sign = if delta > 0, do: "+", else: ""
+    "#{trigger_label(key)}: #{Float.round(baseline, 1)} → #{Float.round(current, 1)} (#{sign}#{Float.round(delta, 1)}, threshold ±#{Float.round(threshold, 1)})"
+  end
+  defp format_trigger(%{key: key, baseline_value: baseline, current_value: current, delta: delta}) do
+    sign = if delta > 0, do: "+", else: ""
+    "#{trigger_label(key)}: #{Float.round(baseline, 1)} → #{Float.round(current, 1)} (#{sign}#{Float.round(delta, 1)})"
+  end
   defp format_trigger(%{key: key, old: nil}), do: trigger_label(key)
   defp format_trigger(%{key: key, old: old, new: new}) do
     delta = new - old
     sign = if delta > 0, do: "+", else: ""
     "#{trigger_label(key)}: #{Float.round(old, 1)} → #{Float.round(new, 1)} (#{sign}#{Float.round(delta, 1)})"
   end
+  defp format_trigger(%{key: key}), do: trigger_label(key)
+  defp format_trigger(_), do: "—"
 
   defp signal_color(:strong_go), do: "#10b981"
   defp signal_color(:go), do: "#34d399"
