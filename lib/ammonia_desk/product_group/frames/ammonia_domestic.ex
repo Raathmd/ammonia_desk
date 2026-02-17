@@ -56,7 +56,7 @@ defmodule AmmoniaDesk.ProductGroup.Frames.AmmoniaDomestic do
         tides:            :timer.minutes(15)
       },
 
-      solver_binary: "solver"  # native/solver (Zig binary)
+      solver_binary: "solver"  # native/solver (generic Zig LP solver)
     }
   end
 
@@ -98,6 +98,12 @@ defmodule AmmoniaDesk.ProductGroup.Frames.AmmoniaDomestic do
       %{key: :barge_count, label: "Barges Available", unit: "", min: 1, max: 30, step: 1,
         default: 14.0, source: :internal, group: :operations, type: :float, delta_threshold: 1.0,
         perturbation: %{stddev: 2.0, min: 1, max: 30}},
+      %{key: :demand_stl, label: "StL Max Demand", unit: "tons", min: 0, max: 20_000, step: 500,
+        default: 10_000.0, source: :internal, group: :operations, type: :float, delta_threshold: 500.0,
+        perturbation: %{stddev: 1500, min: 0, max: 20_000}},
+      %{key: :demand_mem, label: "Memphis Max Demand", unit: "tons", min: 0, max: 15_000, step: 500,
+        default: 8_000.0, source: :internal, group: :operations, type: :float, delta_threshold: 500.0,
+        perturbation: %{stddev: 1200, min: 0, max: 15_000}},
 
       # ── COMMERCIAL ──
       %{key: :nola_buy, label: "NH3 NOLA Buy", unit: "$/t", min: 200, max: 600, step: 5,
@@ -134,27 +140,41 @@ defmodule AmmoniaDesk.ProductGroup.Frames.AmmoniaDomestic do
     [
       %{key: :don_stl, name: "Don→StL", origin: "Donaldsonville, LA", destination: "St. Louis, MO",
         distance_mi: 1050, transport_mode: :barge, freight_variable: :fr_don_stl,
-        sell_variable: :sell_stl, typical_transit_days: 9.0},
+        buy_variable: :nola_buy, sell_variable: :sell_stl,
+        typical_transit_days: 9.0, transit_cost_per_day: 2.0, unit_capacity: 1500.0},
       %{key: :don_mem, name: "Don→Mem", origin: "Donaldsonville, LA", destination: "Memphis, TN",
         distance_mi: 600, transport_mode: :barge, freight_variable: :fr_don_mem,
-        sell_variable: :sell_mem, typical_transit_days: 5.5},
+        buy_variable: :nola_buy, sell_variable: :sell_mem,
+        typical_transit_days: 5.5, transit_cost_per_day: 2.0, unit_capacity: 1500.0},
       %{key: :geis_stl, name: "Geis→StL", origin: "Geismar, LA", destination: "St. Louis, MO",
         distance_mi: 1060, transport_mode: :barge, freight_variable: :fr_geis_stl,
-        sell_variable: :sell_stl, typical_transit_days: 9.5},
+        buy_variable: :nola_buy, sell_variable: :sell_stl,
+        typical_transit_days: 9.5, transit_cost_per_day: 2.0, unit_capacity: 1500.0},
       %{key: :geis_mem, name: "Geis→Mem", origin: "Geismar, LA", destination: "Memphis, TN",
         distance_mi: 610, transport_mode: :barge, freight_variable: :fr_geis_mem,
-        sell_variable: :sell_mem, typical_transit_days: 6.0}
+        buy_variable: :nola_buy, sell_variable: :sell_mem,
+        typical_transit_days: 6.0, transit_cost_per_day: 2.0, unit_capacity: 1500.0}
     ]
   end
 
   defp constraints do
+    all_routes = [:don_stl, :don_mem, :geis_stl, :geis_mem]
+
     [
-      %{key: :supply_don, name: "Supply Don", type: :supply, terminal: "Donaldsonville"},
-      %{key: :supply_geis, name: "Supply Geis", type: :supply, terminal: "Geismar"},
-      %{key: :cap_stl, name: "StL Capacity", type: :demand_cap, destination: "St. Louis"},
-      %{key: :cap_mem, name: "Mem Capacity", type: :demand_cap, destination: "Memphis"},
-      %{key: :fleet, name: "Fleet", type: :fleet_constraint},
-      %{key: :working_cap, name: "Working Cap", type: :capital_constraint}
+      %{key: :supply_don, name: "Supply Don", type: :supply, terminal: "Donaldsonville",
+        bound_variable: :inv_don, routes: [:don_stl, :don_mem]},
+      %{key: :supply_geis, name: "Supply Geis", type: :supply, terminal: "Geismar",
+        bound_variable: :inv_geis, routes: [:geis_stl, :geis_mem]},
+      %{key: :cap_stl, name: "StL Capacity", type: :demand_cap, destination: "St. Louis",
+        bound_variable: :demand_stl, outage_variable: :stl_outage, outage_factor: 0.0,
+        routes: [:don_stl, :geis_stl]},
+      %{key: :cap_mem, name: "Mem Capacity", type: :demand_cap, destination: "Memphis",
+        bound_variable: :demand_mem, outage_variable: :mem_outage, outage_factor: 0.0,
+        routes: [:don_mem, :geis_mem]},
+      %{key: :fleet, name: "Fleet", type: :fleet_constraint,
+        bound_variable: :barge_count, routes: all_routes},
+      %{key: :working_cap, name: "Working Cap", type: :capital_constraint,
+        bound_variable: :working_cap, routes: all_routes}
     ]
   end
 
@@ -166,7 +186,7 @@ defmodule AmmoniaDesk.ProductGroup.Frames.AmmoniaDomestic do
       eia:      %{module: AmmoniaDesk.Data.API.EIA,       variables: [:nat_gas]},
       market:   %{module: AmmoniaDesk.Data.API.Market,    variables: [:nola_buy, :sell_stl, :sell_mem]},
       broker:   %{module: AmmoniaDesk.Data.API.Broker,    variables: [:fr_don_stl, :fr_don_mem, :fr_geis_stl, :fr_geis_mem]},
-      internal: %{module: AmmoniaDesk.Data.API.Internal,  variables: [:inv_don, :inv_geis, :stl_outage, :mem_outage, :barge_count, :working_cap]},
+      internal: %{module: AmmoniaDesk.Data.API.Internal,  variables: [:inv_don, :inv_geis, :stl_outage, :mem_outage, :barge_count, :demand_stl, :demand_mem, :working_cap]},
       vessel_tracking: %{module: AmmoniaDesk.Data.API.VesselTracking, variables: []},
       tides:    %{module: AmmoniaDesk.Data.API.Tides,     variables: []}
     }

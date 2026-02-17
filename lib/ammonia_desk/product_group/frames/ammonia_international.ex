@@ -63,7 +63,7 @@ defmodule AmmoniaDesk.ProductGroup.Frames.AmmoniaInternational do
         internal:         :timer.minutes(10)
       },
 
-      solver_binary: "solver_ammonia_intl"
+      solver_binary: "solver"  # generic LP solver (model descriptor driven)
     }
   end
 
@@ -117,6 +117,26 @@ defmodule AmmoniaDesk.ProductGroup.Frames.AmmoniaInternational do
         default: 60.0, source: :internal, group: :operations, type: :float, delta_threshold: 5.0,
         perturbation: %{stddev: 8.0, min: 0, max: 100}},
 
+      # ── SUPPLY / DEMAND CAPS ──
+      %{key: :supply_trinidad_kt, label: "Trinidad Supply Cap", unit: "kt", min: 0, max: 200, step: 5,
+        default: 40.0, source: :internal, group: :operations, type: :float, delta_threshold: 5.0,
+        perturbation: %{stddev: 8.0, min: 0, max: 200}},
+      %{key: :supply_yuzhnyy_kt, label: "Yuzhnyy Supply Cap", unit: "kt", min: 0, max: 100, step: 5,
+        default: 25.0, source: :internal, group: :operations, type: :float, delta_threshold: 5.0,
+        perturbation: %{stddev: 5.0, min: 0, max: 100}},
+      %{key: :supply_mideast_kt, label: "ME Supply Cap", unit: "kt", min: 0, max: 200, step: 5,
+        default: 50.0, source: :internal, group: :operations, type: :float, delta_threshold: 5.0,
+        perturbation: %{stddev: 10.0, min: 0, max: 200}},
+      %{key: :demand_tampa_kt, label: "Tampa Demand Cap", unit: "kt", min: 0, max: 100, step: 5,
+        default: 50.0, source: :internal, group: :operations, type: :float, delta_threshold: 5.0,
+        perturbation: %{stddev: 10.0, min: 0, max: 100}},
+      %{key: :demand_india_kt, label: "India Demand Cap", unit: "kt", min: 0, max: 300, step: 10,
+        default: 100.0, source: :internal, group: :operations, type: :float, delta_threshold: 10.0,
+        perturbation: %{stddev: 20.0, min: 0, max: 300}},
+      %{key: :demand_morocco_kt, label: "Morocco Demand Cap", unit: "kt", min: 0, max: 200, step: 5,
+        default: 50.0, source: :internal, group: :operations, type: :float, delta_threshold: 5.0,
+        perturbation: %{stddev: 10.0, min: 0, max: 200}},
+
       # ── MACRO ──
       %{key: :nat_gas_feedstock, label: "Nat Gas (feedstock proxy)", unit: "$/MMBtu", min: 1, max: 12, step: 0.1,
         default: 3.50, source: :nat_gas, group: :macro, type: :float, delta_threshold: 0.2,
@@ -138,32 +158,46 @@ defmodule AmmoniaDesk.ProductGroup.Frames.AmmoniaInternational do
       %{key: :trinidad_tampa, name: "Trinidad → Tampa", origin: "Point Lisas, Trinidad",
         destination: "Tampa, FL", distance_nm: 1800,
         transport_mode: :ocean_vessel, freight_variable: :fr_trinidad_tampa,
-        sell_variable: :cfr_tampa, typical_transit_days: 5},
+        buy_variable: :fob_trinidad, sell_variable: :cfr_tampa,
+        typical_transit_days: 5, transit_cost_per_day: 0.5, unit_capacity: 30_000.0},
       %{key: :yuzhnyy_morocco, name: "Yuzhnyy → Morocco", origin: "Yuzhnyy, Ukraine",
         destination: "Jorf Lasfar, Morocco", distance_nm: 3500,
         transport_mode: :ocean_vessel, freight_variable: :fr_yuzhnyy_morocco,
-        sell_variable: :cfr_morocco, typical_transit_days: 10},
+        buy_variable: :fob_yuzhnyy, sell_variable: :cfr_morocco,
+        typical_transit_days: 10, transit_cost_per_day: 0.5, unit_capacity: 30_000.0},
       %{key: :me_india, name: "ME → India", origin: "Jubail, Saudi Arabia",
         destination: "Paradip/Mumbai, India", distance_nm: 2200,
         transport_mode: :ocean_vessel, freight_variable: :fr_me_india,
-        sell_variable: :cfr_india, typical_transit_days: 7},
+        buy_variable: :fob_mideast, sell_variable: :cfr_india,
+        typical_transit_days: 7, transit_cost_per_day: 0.5, unit_capacity: 30_000.0},
       %{key: :trinidad_india, name: "Trinidad → India", origin: "Point Lisas, Trinidad",
         destination: "Paradip/Mumbai, India", distance_nm: 10_000,
         transport_mode: :ocean_vessel, freight_variable: :fr_trinidad_india,
-        sell_variable: :cfr_india, typical_transit_days: 30}
+        buy_variable: :fob_trinidad, sell_variable: :cfr_india,
+        typical_transit_days: 30, transit_cost_per_day: 0.5, unit_capacity: 30_000.0}
     ]
   end
 
   defp constraints do
+    all_routes = [:trinidad_tampa, :yuzhnyy_morocco, :me_india, :trinidad_india]
+
     [
-      %{key: :supply_trinidad, name: "Trinidad Supply", type: :supply, terminal: "Trinidad"},
-      %{key: :supply_yuzhnyy, name: "Yuzhnyy Supply", type: :supply, terminal: "Yuzhnyy"},
-      %{key: :supply_mideast, name: "ME Supply", type: :supply, terminal: "Middle East"},
-      %{key: :dest_tampa, name: "Tampa Demand", type: :demand_cap, destination: "Tampa"},
-      %{key: :dest_india, name: "India Demand", type: :demand_cap, destination: "India"},
-      %{key: :dest_morocco, name: "Morocco Demand", type: :demand_cap, destination: "Morocco"},
-      %{key: :fleet, name: "Fleet", type: :fleet_constraint},
-      %{key: :working_cap, name: "Working Cap", type: :capital_constraint}
+      %{key: :supply_trinidad, name: "Trinidad Supply", type: :supply, terminal: "Trinidad",
+        bound_variable: :supply_trinidad_kt, routes: [:trinidad_tampa, :trinidad_india]},
+      %{key: :supply_yuzhnyy, name: "Yuzhnyy Supply", type: :supply, terminal: "Yuzhnyy",
+        bound_variable: :supply_yuzhnyy_kt, routes: [:yuzhnyy_morocco]},
+      %{key: :supply_mideast, name: "ME Supply", type: :supply, terminal: "Middle East",
+        bound_variable: :supply_mideast_kt, routes: [:me_india]},
+      %{key: :dest_tampa, name: "Tampa Demand", type: :demand_cap, destination: "Tampa",
+        bound_variable: :demand_tampa_kt, routes: [:trinidad_tampa]},
+      %{key: :dest_india, name: "India Demand", type: :demand_cap, destination: "India",
+        bound_variable: :demand_india_kt, routes: [:me_india, :trinidad_india]},
+      %{key: :dest_morocco, name: "Morocco Demand", type: :demand_cap, destination: "Morocco",
+        bound_variable: :demand_morocco_kt, routes: [:yuzhnyy_morocco]},
+      %{key: :fleet, name: "Fleet", type: :fleet_constraint,
+        bound_variable: :vessel_count, routes: all_routes},
+      %{key: :working_cap, name: "Working Cap", type: :capital_constraint,
+        bound_variable: :working_cap, routes: all_routes}
     ]
   end
 
@@ -181,7 +215,9 @@ defmodule AmmoniaDesk.ProductGroup.Frames.AmmoniaInternational do
                          description: "ECB/Fed exchange rate feeds"},
       bunker_fuel:     %{module: nil, variables: [:bunker_380],
                          description: "Ship & Bunker, Argus Bunker Index"},
-      internal:        %{module: nil, variables: [:vessel_count, :storage_tampa_kt, :plant_utilization_pct, :tank_level_pct, :working_cap],
+      internal:        %{module: nil, variables: [:vessel_count, :storage_tampa_kt, :plant_utilization_pct, :tank_level_pct,
+                                                   :supply_trinidad_kt, :supply_yuzhnyy_kt, :supply_mideast_kt,
+                                                   :demand_tampa_kt, :demand_india_kt, :demand_morocco_kt, :working_cap],
                          description: "Internal TMS, terminal gauges, SAP"}
     }
   end

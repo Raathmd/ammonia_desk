@@ -62,7 +62,7 @@ defmodule AmmoniaDesk.ProductGroup.Frames.SulphurInternational do
         internal:         :timer.minutes(10)
       },
 
-      solver_binary: "solver_sulphur"
+      solver_binary: "solver"  # generic LP solver (model descriptor driven)
     }
   end
 
@@ -116,6 +116,23 @@ defmodule AmmoniaDesk.ProductGroup.Frames.SulphurInternational do
         default: 85.0, source: :internal, group: :operations, type: :float, delta_threshold: 5.0,
         perturbation: %{stddev: 5.0, min: 0, max: 100}},
 
+      # ── SUPPLY / DEMAND CAPS ──
+      %{key: :supply_mideast_kt, label: "ME Supply Cap", unit: "kt", min: 0, max: 1000, step: 10,
+        default: 300.0, source: :internal, group: :operations, type: :float, delta_threshold: 20.0,
+        perturbation: %{stddev: 40.0, min: 0, max: 1000}},
+      %{key: :supply_batumi_kt, label: "Batumi Supply Cap", unit: "kt", min: 0, max: 300, step: 10,
+        default: 100.0, source: :internal, group: :operations, type: :float, delta_threshold: 10.0,
+        perturbation: %{stddev: 15.0, min: 0, max: 300}},
+      %{key: :demand_morocco_kt, label: "Morocco Demand Cap", unit: "kt", min: 0, max: 500, step: 10,
+        default: 200.0, source: :internal, group: :operations, type: :float, delta_threshold: 20.0,
+        perturbation: %{stddev: 30.0, min: 0, max: 500}},
+      %{key: :demand_india_kt, label: "India Demand Cap", unit: "kt", min: 0, max: 800, step: 10,
+        default: 300.0, source: :internal, group: :operations, type: :float, delta_threshold: 20.0,
+        perturbation: %{stddev: 40.0, min: 0, max: 800}},
+      %{key: :demand_china_kt, label: "China Demand Cap", unit: "kt", min: 0, max: 1000, step: 20,
+        default: 500.0, source: :internal, group: :operations, type: :float, delta_threshold: 30.0,
+        perturbation: %{stddev: 60.0, min: 0, max: 1000}},
+
       # ── MACRO ──
       %{key: :usd_inr, label: "USD/INR", unit: "", min: 70, max: 100, step: 0.1,
         default: 83.5, source: :fx_rates, group: :macro, type: :float, delta_threshold: 0.5,
@@ -137,32 +154,46 @@ defmodule AmmoniaDesk.ProductGroup.Frames.SulphurInternational do
       %{key: :van_morocco, name: "Vancouver → Morocco", origin: "Vancouver, BC",
         destination: "Jorf Lasfar, Morocco", distance_nm: 8900,
         transport_mode: :ocean_vessel, freight_variable: :fr_van_morocco,
-        sell_variable: :cfr_morocco, typical_transit_days: 25},
+        buy_variable: :fob_vancouver, sell_variable: :cfr_morocco,
+        typical_transit_days: 25, transit_cost_per_day: 0.3, unit_capacity: 50_000.0},
       %{key: :me_india, name: "ME → India", origin: "Abu Dhabi/Ruwais, UAE",
         destination: "Mumbai/Paradip, India", distance_nm: 1800,
         transport_mode: :ocean_vessel, freight_variable: :fr_me_india,
-        sell_variable: :cfr_india, typical_transit_days: 7},
+        buy_variable: :fob_mideast, sell_variable: :cfr_india,
+        typical_transit_days: 7, transit_cost_per_day: 0.3, unit_capacity: 50_000.0},
       %{key: :me_china, name: "ME → China", origin: "Abu Dhabi/Ruwais, UAE",
         destination: "Nanjing/Zhanjiang, China", distance_nm: 5500,
         transport_mode: :ocean_vessel, freight_variable: :fr_me_china,
-        sell_variable: :cfr_china, typical_transit_days: 18},
+        buy_variable: :fob_mideast, sell_variable: :cfr_china,
+        typical_transit_days: 18, transit_cost_per_day: 0.3, unit_capacity: 50_000.0},
       %{key: :batumi_morocco, name: "Batumi → Morocco", origin: "Batumi, Georgia",
         destination: "Jorf Lasfar, Morocco", distance_nm: 3200,
         transport_mode: :ocean_vessel, freight_variable: :fr_batumi_morocco,
-        sell_variable: :cfr_morocco, typical_transit_days: 10}
+        buy_variable: :fob_batumi, sell_variable: :cfr_morocco,
+        typical_transit_days: 10, transit_cost_per_day: 0.3, unit_capacity: 50_000.0}
     ]
   end
 
   defp constraints do
+    all_routes = [:van_morocco, :me_india, :me_china, :batumi_morocco]
+
     [
-      %{key: :supply_vancouver, name: "Vancouver Supply", type: :supply, terminal: "Vancouver"},
-      %{key: :supply_mideast, name: "ME Supply", type: :supply, terminal: "Middle East"},
-      %{key: :supply_batumi, name: "Batumi Supply", type: :supply, terminal: "Batumi"},
-      %{key: :dest_morocco, name: "Morocco Demand Cap", type: :demand_cap, destination: "Morocco"},
-      %{key: :dest_india, name: "India Demand Cap", type: :demand_cap, destination: "India"},
-      %{key: :dest_china, name: "China Demand Cap", type: :demand_cap, destination: "China"},
-      %{key: :fleet, name: "Fleet", type: :fleet_constraint},
-      %{key: :working_cap, name: "Working Cap", type: :capital_constraint}
+      %{key: :supply_vancouver, name: "Vancouver Supply", type: :supply, terminal: "Vancouver",
+        bound_variable: :storage_vancouver_kt, routes: [:van_morocco]},
+      %{key: :supply_mideast, name: "ME Supply", type: :supply, terminal: "Middle East",
+        bound_variable: :supply_mideast_kt, routes: [:me_india, :me_china]},
+      %{key: :supply_batumi, name: "Batumi Supply", type: :supply, terminal: "Batumi",
+        bound_variable: :supply_batumi_kt, routes: [:batumi_morocco]},
+      %{key: :dest_morocco, name: "Morocco Demand Cap", type: :demand_cap, destination: "Morocco",
+        bound_variable: :demand_morocco_kt, routes: [:van_morocco, :batumi_morocco]},
+      %{key: :dest_india, name: "India Demand Cap", type: :demand_cap, destination: "India",
+        bound_variable: :demand_india_kt, routes: [:me_india]},
+      %{key: :dest_china, name: "China Demand Cap", type: :demand_cap, destination: "China",
+        bound_variable: :demand_china_kt, routes: [:me_china]},
+      %{key: :fleet, name: "Fleet", type: :fleet_constraint,
+        bound_variable: :vessel_count, routes: all_routes},
+      %{key: :working_cap, name: "Working Cap", type: :capital_constraint,
+        bound_variable: :working_cap, routes: all_routes}
     ]
   end
 
@@ -180,7 +211,10 @@ defmodule AmmoniaDesk.ProductGroup.Frames.SulphurInternational do
                          description: "ECB/Fed exchange rate feeds"},
       bunker_fuel:     %{module: nil, variables: [:bunker_380],
                          description: "Ship & Bunker, Argus Bunker Index"},
-      internal:        %{module: nil, variables: [:vessel_count, :storage_vancouver_kt, :rail_capacity_pct, :suez_canal_usd, :working_cap],
+      internal:        %{module: nil, variables: [:vessel_count, :storage_vancouver_kt, :rail_capacity_pct,
+                                                   :supply_mideast_kt, :supply_batumi_kt,
+                                                   :demand_morocco_kt, :demand_india_kt, :demand_china_kt,
+                                                   :suez_canal_usd, :working_cap],
                          description: "Internal TMS, SAP, terminal systems"}
     }
   end

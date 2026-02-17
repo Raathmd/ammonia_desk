@@ -60,7 +60,7 @@ defmodule AmmoniaDesk.ProductGroup.Frames.Petcoke do
         internal:         :timer.minutes(10)
       },
 
-      solver_binary: "solver_petcoke"
+      solver_binary: "solver"  # generic LP solver (model descriptor driven)
     }
   end
 
@@ -105,6 +105,17 @@ defmodule AmmoniaDesk.ProductGroup.Frames.Petcoke do
         default: 15_000.0, source: :internal, group: :operations, type: :float, delta_threshold: 2000.0,
         perturbation: %{stddev: 3000.0, min: 5000, max: 30_000}},
 
+      # ── SUPPLY / DEMAND CAPS ──
+      %{key: :supply_india_kt, label: "India Supply Cap", unit: "kt", min: 0, max: 200, step: 10,
+        default: 60.0, source: :internal, group: :operations, type: :float, delta_threshold: 10.0,
+        perturbation: %{stddev: 10.0, min: 0, max: 200}},
+      %{key: :demand_india_kt, label: "India Demand Cap", unit: "kt", min: 0, max: 500, step: 10,
+        default: 200.0, source: :internal, group: :operations, type: :float, delta_threshold: 15.0,
+        perturbation: %{stddev: 30.0, min: 0, max: 500}},
+      %{key: :demand_china_kt, label: "China Demand Cap", unit: "kt", min: 0, max: 600, step: 20,
+        default: 300.0, source: :internal, group: :operations, type: :float, delta_threshold: 20.0,
+        perturbation: %{stddev: 40.0, min: 0, max: 600}},
+
       # ── QUALITY / MACRO ──
       %{key: :hgi, label: "HGI (Hardgrove)", unit: "", min: 30, max: 100, step: 1,
         default: 55.0, source: :internal, group: :quality, type: :float, delta_threshold: 3.0,
@@ -129,26 +140,37 @@ defmodule AmmoniaDesk.ProductGroup.Frames.Petcoke do
       %{key: :usgc_india, name: "USGC → India", origin: "US Gulf Coast",
         destination: "Mundra/Kandla, India", distance_nm: 9500,
         transport_mode: :ocean_vessel, freight_variable: :fr_usgc_india,
-        sell_variable: :cfr_india, typical_transit_days: 35},
+        buy_variable: :fob_usgc, sell_variable: :cfr_india,
+        typical_transit_days: 35, transit_cost_per_day: 0.2, unit_capacity: 50_000.0},
       %{key: :usgc_china, name: "USGC → China", origin: "US Gulf Coast",
         destination: "Qingdao/Lianyungang, China", distance_nm: 11_000,
         transport_mode: :ocean_vessel, freight_variable: :fr_usgc_china,
-        sell_variable: :cfr_china, typical_transit_days: 40},
+        buy_variable: :fob_usgc, sell_variable: :cfr_china,
+        typical_transit_days: 40, transit_cost_per_day: 0.2, unit_capacity: 50_000.0},
       %{key: :india_china, name: "India → China", origin: "Mundra/Jamnagar, India",
         destination: "Qingdao/Lianyungang, China", distance_nm: 4500,
         transport_mode: :ocean_vessel, freight_variable: :fr_india_china,
-        sell_variable: :cfr_china, typical_transit_days: 15}
+        buy_variable: :fob_india, sell_variable: :cfr_china,
+        typical_transit_days: 15, transit_cost_per_day: 0.2, unit_capacity: 50_000.0}
     ]
   end
 
   defp constraints do
+    all_routes = [:usgc_india, :usgc_china, :india_china]
+
     [
-      %{key: :supply_usgc, name: "USGC Supply", type: :supply, terminal: "US Gulf Coast"},
-      %{key: :supply_india, name: "India Supply", type: :supply, terminal: "India"},
-      %{key: :dest_india, name: "India Demand", type: :demand_cap, destination: "India"},
-      %{key: :dest_china, name: "China Demand", type: :demand_cap, destination: "China"},
-      %{key: :fleet, name: "Fleet", type: :fleet_constraint},
-      %{key: :working_cap, name: "Working Cap", type: :capital_constraint}
+      %{key: :supply_usgc, name: "USGC Supply", type: :supply, terminal: "US Gulf Coast",
+        bound_variable: :storage_usgc_kt, routes: [:usgc_india, :usgc_china]},
+      %{key: :supply_india, name: "India Supply", type: :supply, terminal: "India",
+        bound_variable: :supply_india_kt, routes: [:india_china]},
+      %{key: :dest_india, name: "India Demand", type: :demand_cap, destination: "India",
+        bound_variable: :demand_india_kt, routes: [:usgc_india]},
+      %{key: :dest_china, name: "China Demand", type: :demand_cap, destination: "China",
+        bound_variable: :demand_china_kt, routes: [:usgc_china, :india_china]},
+      %{key: :fleet, name: "Fleet", type: :fleet_constraint,
+        bound_variable: :vessel_count, routes: all_routes},
+      %{key: :working_cap, name: "Working Cap", type: :capital_constraint,
+        bound_variable: :working_cap, routes: all_routes}
     ]
   end
 
@@ -165,6 +187,7 @@ defmodule AmmoniaDesk.ProductGroup.Frames.Petcoke do
       bunker_fuel:     %{module: nil, variables: [:bunker_380],
                          description: "Ship & Bunker, Argus Bunker Index"},
       internal:        %{module: nil, variables: [:storage_usgc_kt, :vessel_count, :load_rate_tpd,
+                                                   :supply_india_kt, :demand_india_kt, :demand_china_kt,
                                                    :hgi, :sulfur_pct, :cv_kcal, :working_cap],
                          description: "Internal TMS, quality lab, SAP"}
     }
