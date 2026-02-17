@@ -1,5 +1,5 @@
-alias AmmoniaDesk.Data.LiveState
-alias AmmoniaDesk.Solver.Port
+alias TradingDesk.Data.LiveState
+alias TradingDesk.Solver.Port
 
 vars = LiveState.get()
 IO.puts("Running Monte Carlo with 100 scenarios...")

@@ -1,4 +1,4 @@
-defmodule AmmoniaDesk.Repo.Migrations.CreateContractsAndAudit do
+defmodule TradingDesk.Repo.Migrations.CreateContractsAndAudit do
   use Ecto.Migration
 
   def change do

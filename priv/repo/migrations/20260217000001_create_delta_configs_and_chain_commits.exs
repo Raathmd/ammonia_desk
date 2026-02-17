@@ -1,4 +1,4 @@
-defmodule AmmoniaDesk.Repo.Migrations.CreateDeltaConfigsAndChainCommits do
+defmodule TradingDesk.Repo.Migrations.CreateDeltaConfigsAndChainCommits do
   use Ecto.Migration
 
   def change do

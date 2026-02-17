@@ -71,7 +71,7 @@ sudo cp highs/lp_data/HighsCallbackStruct.h /usr/local/include/
 ## 3. Build the solver (static linked)
 
 ```bash
-cd ammonia_desk/native
+cd trading_desk/native
 
 zig build-exe solver.zig \
   -lhighs -lstdc++ \

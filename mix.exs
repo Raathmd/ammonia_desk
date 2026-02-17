@@ -1,9 +1,9 @@
-defmodule AmmoniaDesk.MixProject do
+defmodule TradingDesk.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :ammonia_desk,
+      app: :trading_desk,
       version: "0.1.0",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
@@ -15,7 +15,7 @@ defmodule AmmoniaDesk.MixProject do
   def application do
     [
       extra_applications: [:logger, :runtime_tools],
-      mod: {AmmoniaDesk.Application, []}
+      mod: {TradingDesk.Application, []}
     ]
   end
 
