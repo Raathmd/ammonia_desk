@@ -90,6 +90,8 @@ defmodule TradingDesk.ScenarioLive do
       |> assign(:review_mode, nil)
       |> assign(:sap_positions, nil)
       |> assign(:post_solve_impact, nil)
+      |> assign(:ammonia_prices, TradingDesk.Data.AmmoniaPrices.price_summary())
+      |> assign(:contracts_data, load_contracts_data())
 
     {:ok, socket}
   end
@@ -548,7 +550,14 @@ defmodule TradingDesk.ScenarioLive do
           </select>
           <a href="/contracts" style="color:#a78bfa;text-decoration:none;font-size:11px;font-weight:600;padding:4px 10px;border:1px solid #1e293b;border-radius:4px">CONTRACTS</a>
         </div>
-        <div style="display:flex;align-items:center;gap:16px;font-size:12px">
+        <div style="display:flex;align-items:center;gap:12px;font-size:11px">
+          <%!-- Ammonia Prices Ticker --%>
+          <div style="display:flex;align-items:center;gap:8px;padding-right:12px;border-right:1px solid #1b2838">
+            <%= for p <- Enum.take(@ammonia_prices, 4) do %>
+              <span style="color:#475569"><%= p.label %></span>
+              <span style={"color:#{if p.direction == :buy, do: "#60a5fa", else: "#f59e0b"};font-weight:700;font-family:monospace"}>$<%= round(p.price) %></span>
+            <% end %>
+          </div>
           <%= if @auto_result do %>
             <span style="color:#64748b">AUTO</span>
             <span style={"background:#0f2a1f;color:#{signal_color(@auto_result.distribution.signal)};padding:3px 10px;border-radius:4px;font-weight:700;font-size:11px"}><%= signal_text(@auto_result.distribution.signal) %></span>
@@ -674,14 +683,12 @@ defmodule TradingDesk.ScenarioLive do
         <div style="overflow-y:auto;padding:16px">
           <%!-- Tab buttons --%>
           <div style="display:flex;gap:2px;margin-bottom:16px">
-            <button phx-click="switch_tab" phx-value-tab="trader"
-              style={"padding:8px 16px;border:none;border-radius:6px 6px 0 0;font-size:12px;font-weight:600;cursor:pointer;background:#{if @active_tab == :trader, do: "#111827", else: "transparent"};color:#{if @active_tab == :trader, do: "#e2e8f0", else: "#475569"};border-bottom:2px solid #{if @active_tab == :trader, do: "#38bdf8", else: "transparent"}"}>
-              ⚡ Trader
-            </button>
-            <button phx-click="switch_tab" phx-value-tab="agent"
-              style={"padding:8px 16px;border:none;border-radius:6px 6px 0 0;font-size:12px;font-weight:600;cursor:pointer;background:#{if @active_tab == :agent, do: "#111827", else: "transparent"};color:#{if @active_tab == :agent, do: "#e2e8f0", else: "#475569"};border-bottom:2px solid #{if @active_tab == :agent, do: "#10b981", else: "transparent"}"}>
-              🤖 Agent
-            </button>
+            <%= for {tab, label, color} <- [{:trader, "Trader", "#38bdf8"}, {:contracts, "Contracts", "#a78bfa"}, {:map, "Map", "#60a5fa"}, {:agent, "Agent", "#10b981"}] do %>
+              <button phx-click="switch_tab" phx-value-tab={tab}
+                style={"padding:8px 16px;border:none;border-radius:6px 6px 0 0;font-size:12px;font-weight:600;cursor:pointer;background:#{if @active_tab == tab, do: "#111827", else: "transparent"};color:#{if @active_tab == tab, do: "#e2e8f0", else: "#475569"};border-bottom:2px solid #{if @active_tab == tab, do: color, else: "transparent"}"}>
+                <%= label %>
+              </button>
+            <% end %>
           </div>
 
           <%!-- Pipeline status banner --%>
@@ -814,51 +821,6 @@ defmodule TradingDesk.ScenarioLive do
               </div>
             <% end %>
 
-            <%!-- === ROUTE MAP === --%>
-            <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
-              <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700;margin-bottom:8px">ROUTE MAP</div>
-              <div id={"trader-map-#{@product_group}"} phx-hook="VesselMap" phx-update="ignore"
-                data-mapdata={map_data_json(@product_group, @frame, @result, @vessel_data)}
-                style="height:280px;border-radius:8px;background:#0a0f18"></div>
-            </div>
-
-            <%!-- === FLEET TRACKING (Trader tab) === --%>
-            <%= if @vessel_data && @vessel_data[:vessels] && length(@vessel_data[:vessels]) > 0 do %>
-              <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-                  <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700">FLEET TRACKING</div>
-                  <div style="font-size:10px;color:#475569">
-                    <%= if @vessel_data[:fleet_summary] do %>
-                      <%= @vessel_data[:fleet_summary][:total_vessels] %> vessels
-                      — <%= @vessel_data[:fleet_summary][:underway] || 0 %> underway
-                    <% end %>
-                  </div>
-                </div>
-                <table style="width:100%;border-collapse:collapse;font-size:11px">
-                  <thead><tr style="border-bottom:1px solid #1e293b">
-                    <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Vessel</th>
-                    <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Near</th>
-                    <th style="text-align:right;padding:4px 6px;color:#64748b;font-size:10px">Mile</th>
-                    <th style="text-align:right;padding:4px 6px;color:#64748b;font-size:10px">Speed</th>
-                    <th style="text-align:center;padding:4px 6px;color:#64748b;font-size:10px">Dir</th>
-                    <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Status</th>
-                  </tr></thead>
-                  <tbody>
-                    <%= for vessel <- @vessel_data[:vessels] do %>
-                      <tr style="border-bottom:1px solid #1e293b11">
-                        <td style="padding:5px 6px;font-weight:600;color:#e2e8f0;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= vessel[:name] || "Unknown" %></td>
-                        <td style="padding:5px 6px;color:#94a3b8"><%= vessel[:nearest_waypoint] || "—" %></td>
-                        <td style="text-align:right;padding:5px 6px;font-family:monospace;color:#38bdf8"><%= vessel[:river_mile] || "—" %></td>
-                        <td style="text-align:right;padding:5px 6px;font-family:monospace;color:#c8d6e5"><%= if vessel[:speed], do: "#{Float.round(vessel[:speed], 1)}kn", else: "—" %></td>
-                        <td style="text-align:center;padding:5px 6px"><%= vessel_status_icon(vessel[:direction]) %></td>
-                        <td style={"padding:5px 6px;color:#{vessel_status_color(vessel[:status])};font-size:10px;font-weight:600"}><%= vessel_status_text(vessel[:status]) %></td>
-                      </tr>
-                    <% end %>
-                  </tbody>
-                </table>
-              </div>
-            <% end %>
-
             <%!-- === TIDES & CURRENTS (Trader tab) === --%>
             <%= if @tides_data do %>
               <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
@@ -960,6 +922,168 @@ defmodule TradingDesk.ScenarioLive do
                 <% end %>
               </div>
             <% end %>
+
+          <%!-- === CONTRACTS TAB === --%>
+          <%= if @active_tab == :contracts do %>
+            <%!-- Ammonia Price Board --%>
+            <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+              <div style="font-size:10px;color:#a78bfa;letter-spacing:1px;font-weight:700;margin-bottom:10px">AMMONIA BENCHMARK PRICES</div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+                <%= for p <- @ammonia_prices do %>
+                  <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                    <div style="font-size:9px;color:#64748b"><%= p.label %></div>
+                    <div style={"font-size:16px;font-weight:700;font-family:monospace;color:#{if p.direction == :buy, do: "#60a5fa", else: "#f59e0b"};"}>$<%= round(p.price) %></div>
+                    <div style="font-size:8px;color:#475569"><%= p.source %></div>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+
+            <%!-- Open Book Summary --%>
+            <%= if @contracts_data do %>
+              <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                  <span style="font-size:10px;color:#a78bfa;letter-spacing:1px;font-weight:700">OPEN BOOK</span>
+                  <span style={"font-size:12px;font-weight:700;font-family:monospace;color:#{if @contracts_data.net_position > 0, do: "#4ade80", else: "#f87171"}"}>
+                    NET: <%= if @contracts_data.net_position > 0, do: "+", else: "" %><%= format_number(@contracts_data.net_position) %> MT
+                  </span>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
+                  <div style="background:#0a1628;padding:12px;border-radius:8px;border-left:3px solid #60a5fa">
+                    <div style="font-size:10px;color:#64748b">Purchase Open</div>
+                    <div style="font-size:22px;font-weight:800;color:#60a5fa;font-family:monospace"><%= format_number(@contracts_data.total_purchase_open) %> MT</div>
+                    <div style="font-size:10px;color:#475569"><%= length(Enum.filter(@contracts_data.contracts, & &1.direction == :purchase)) %> contracts</div>
+                  </div>
+                  <div style="background:#1a1400;padding:12px;border-radius:8px;border-left:3px solid #f59e0b">
+                    <div style="font-size:10px;color:#64748b">Sale Open</div>
+                    <div style="font-size:22px;font-weight:800;color:#f59e0b;font-family:monospace"><%= format_number(@contracts_data.total_sale_open) %> MT</div>
+                    <div style="font-size:10px;color:#475569"><%= length(Enum.filter(@contracts_data.contracts, & &1.direction == :sale)) %> contracts</div>
+                  </div>
+                </div>
+
+                <%!-- Contract Detail Table --%>
+                <table style="width:100%;border-collapse:collapse;font-size:11px">
+                  <thead><tr style="border-bottom:1px solid #1e293b">
+                    <th style="text-align:left;padding:6px;color:#64748b;font-size:10px">Counterparty</th>
+                    <th style="text-align:center;padding:6px;color:#64748b;font-size:10px">Dir</th>
+                    <th style="text-align:center;padding:6px;color:#64748b;font-size:10px">Incoterm</th>
+                    <th style="text-align:right;padding:6px;color:#64748b;font-size:10px">Total</th>
+                    <th style="text-align:right;padding:6px;color:#64748b;font-size:10px">Open</th>
+                    <th style="text-align:center;padding:6px;color:#64748b;font-size:10px">Progress</th>
+                    <th style="text-align:left;padding:6px;color:#64748b;font-size:10px">Penalties</th>
+                  </tr></thead>
+                  <tbody>
+                    <%= for c <- @contracts_data.contracts do %>
+                      <tr style="border-bottom:1px solid #1e293b11">
+                        <td style="padding:6px">
+                          <div style="font-weight:600;color:#e2e8f0"><%= c.counterparty %></div>
+                          <div style="font-size:9px;color:#475569"><%= c.contract_number %></div>
+                        </td>
+                        <td style={"text-align:center;padding:6px;font-weight:600;color:#{if c.direction == :purchase, do: "#60a5fa", else: "#f59e0b"}"}><%= if c.direction == :purchase, do: "BUY", else: "SELL" %></td>
+                        <td style="text-align:center;padding:6px;color:#94a3b8;font-weight:600"><%= c.incoterm |> to_string() |> String.upcase() %></td>
+                        <td style="text-align:right;padding:6px;font-family:monospace;color:#94a3b8"><%= format_number(c.total_qty) %></td>
+                        <td style="text-align:right;padding:6px;font-family:monospace;color:#e2e8f0;font-weight:700"><%= format_number(c.open_qty) %></td>
+                        <td style="padding:6px">
+                          <div style="display:flex;align-items:center;gap:4px">
+                            <div style="flex:1;height:4px;background:#1e293b;border-radius:2px;overflow:hidden">
+                              <div style={"width:#{c.pct_complete}%;height:100%;background:#{if c.pct_complete > 50, do: "#10b981", else: "#38bdf8"};border-radius:2px"}></div>
+                            </div>
+                            <span style="font-size:9px;color:#64748b;width:28px;text-align:right"><%= c.pct_complete %>%</span>
+                          </div>
+                        </td>
+                        <td style="padding:6px">
+                          <%= for p <- c.penalties do %>
+                            <div style="font-size:9px;padding:1px 0">
+                              <span style="color:#fca5a5"><%= p.type %></span>
+                              <span style="color:#64748b"> — </span>
+                              <span style="color:#f59e0b;font-family:monospace"><%= p.rate %></span>
+                            </div>
+                          <% end %>
+                          <%= if length(c.penalties) == 0 do %>
+                            <span style="font-size:9px;color:#475569">—</span>
+                          <% end %>
+                        </td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              </div>
+            <% end %>
+          <% end %>
+
+          <%!-- === MAP TAB === --%>
+          <%= if @active_tab == :map do %>
+            <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+              <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700;margin-bottom:8px">ROUTE MAP</div>
+              <div id={"map-tab-#{@product_group}"} phx-hook="VesselMap" phx-update="ignore"
+                data-mapdata={map_data_json(@product_group, @frame, @result, @vessel_data)}
+                style="height:450px;border-radius:8px;background:#0a0f18"></div>
+            </div>
+
+            <%!-- Fleet Tracking --%>
+            <%= if @vessel_data && @vessel_data[:vessels] && length(@vessel_data[:vessels]) > 0 do %>
+              <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                  <div style="font-size:10px;color:#60a5fa;letter-spacing:1px;font-weight:700">FLEET TRACKING</div>
+                  <div style="font-size:10px;color:#475569">
+                    <%= if @vessel_data[:fleet_summary] do %>
+                      <%= @vessel_data[:fleet_summary][:total_vessels] %> vessels
+                      — <%= @vessel_data[:fleet_summary][:underway] || 0 %> underway
+                    <% end %>
+                  </div>
+                </div>
+                <table style="width:100%;border-collapse:collapse;font-size:11px">
+                  <thead><tr style="border-bottom:1px solid #1e293b">
+                    <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Vessel</th>
+                    <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Near</th>
+                    <th style="text-align:right;padding:4px 6px;color:#64748b;font-size:10px">Mile</th>
+                    <th style="text-align:right;padding:4px 6px;color:#64748b;font-size:10px">Speed</th>
+                    <th style="text-align:center;padding:4px 6px;color:#64748b;font-size:10px">Dir</th>
+                    <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Status</th>
+                  </tr></thead>
+                  <tbody>
+                    <%= for vessel <- @vessel_data[:vessels] do %>
+                      <tr style="border-bottom:1px solid #1e293b11">
+                        <td style="padding:5px 6px;font-weight:600;color:#e2e8f0;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= vessel[:name] || "Unknown" %></td>
+                        <td style="padding:5px 6px;color:#94a3b8"><%= vessel[:nearest_waypoint] || "—" %></td>
+                        <td style="text-align:right;padding:5px 6px;font-family:monospace;color:#38bdf8"><%= vessel[:river_mile] || "—" %></td>
+                        <td style="text-align:right;padding:5px 6px;font-family:monospace;color:#c8d6e5"><%= if vessel[:speed], do: "#{Float.round(vessel[:speed], 1)}kn", else: "—" %></td>
+                        <td style="text-align:center;padding:5px 6px"><%= vessel_status_icon(vessel[:direction]) %></td>
+                        <td style={"padding:5px 6px;color:#{vessel_status_color(vessel[:status])};font-size:10px;font-weight:600"}><%= vessel_status_text(vessel[:status]) %></td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              </div>
+            <% end %>
+
+            <%!-- Tides & Currents on Map tab --%>
+            <%= if @tides_data do %>
+              <div style="background:#111827;border-radius:10px;padding:16px;margin-bottom:16px">
+                <div style="font-size:10px;color:#818cf8;letter-spacing:1px;font-weight:700;margin-bottom:10px">TIDES & CURRENTS</div>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+                  <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                    <div style="font-size:9px;color:#64748b">Water Level</div>
+                    <div style="font-size:16px;font-weight:700;color:#60a5fa;font-family:monospace">
+                      <%= if @tides_data[:water_level_ft], do: "#{Float.round(@tides_data[:water_level_ft], 1)}ft", else: "—" %>
+                    </div>
+                  </div>
+                  <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                    <div style="font-size:9px;color:#64748b">Tidal Range</div>
+                    <div style="font-size:16px;font-weight:700;color:#818cf8;font-family:monospace">
+                      <%= if @tides_data[:tidal_range_ft], do: "#{Float.round(@tides_data[:tidal_range_ft], 1)}ft", else: "—" %>
+                    </div>
+                  </div>
+                  <div style="background:#0a0f18;padding:8px;border-radius:6px;text-align:center">
+                    <div style="font-size:9px;color:#64748b">Current</div>
+                    <div style="font-size:16px;font-weight:700;color:#38bdf8;font-family:monospace">
+                      <%= if @tides_data[:current_speed_kn], do: "#{Float.round(@tides_data[:current_speed_kn], 1)}kn", else: "—" %>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            <% end %>
+          <% end %>
 
           <%!-- === AGENT TAB === --%>
           <%= if @active_tab == :agent do %>
@@ -1446,6 +1570,57 @@ defmodule TradingDesk.ScenarioLive do
     |> String.trim_leading(",")
   end
   defp format_number(val), do: to_string(val)
+
+  defp load_contracts_data do
+    book = TradingDesk.Contracts.SapPositions.book_summary()
+    positions = book.positions
+
+    contracts =
+      positions
+      |> Enum.sort_by(fn {_k, v} -> v.open_qty_mt end, :desc)
+      |> Enum.map(fn {name, pos} ->
+        # Get penalty info from seed loader positions
+        penalties = case pos.direction do
+          :purchase ->
+            case name do
+              "NGC Trinidad" -> [%{type: "Volume shortfall", rate: "$15/MT", applies_to: "Buyer"}]
+              "SABIC Agri-Nutrients" -> [%{type: "Volume shortfall", rate: "$12/MT", applies_to: "Buyer"}]
+              "LSB Industries" -> [%{type: "Volume shortfall", rate: "$10/MT", applies_to: "Buyer"}]
+              _ -> []
+            end
+          :sale ->
+            case name do
+              "Mosaic Company" -> [%{type: "Late delivery", rate: "$20/MT", applies_to: "Seller"}, %{type: "Volume shortfall", rate: "$18/MT", applies_to: "Seller"}]
+              "IFFCO" -> [%{type: "Late delivery", rate: "$15/MT", applies_to: "Seller"}, %{type: "Volume shortfall", rate: "$12/MT", applies_to: "Seller"}]
+              "OCP Group" -> [%{type: "Late delivery", rate: "$22/MT", applies_to: "Seller"}]
+              "Nutrien StL" -> [%{type: "Volume shortfall", rate: "$12/MT", applies_to: "Seller"}, %{type: "Late delivery", rate: "$8/MT", applies_to: "Seller"}]
+              "Koch Fertilizer" -> [%{type: "Volume shortfall", rate: "$10/MT", applies_to: "Seller"}]
+              "BASF SE" -> [%{type: "Late delivery", rate: "$25/MT", applies_to: "Seller"}]
+              _ -> []
+            end
+        end
+
+        %{
+          counterparty: name,
+          contract_number: pos.contract_number,
+          direction: pos.direction,
+          incoterm: pos.incoterm,
+          total_qty: pos.total_qty_mt,
+          delivered_qty: pos.delivered_qty_mt,
+          open_qty: pos.open_qty_mt,
+          period: pos.period,
+          penalties: penalties,
+          pct_complete: if(pos.total_qty_mt > 0, do: round(pos.delivered_qty_mt / pos.total_qty_mt * 100), else: 0)
+        }
+      end)
+
+    %{
+      contracts: contracts,
+      total_purchase_open: book.total_purchase_open,
+      total_sale_open: book.total_sale_open,
+      net_position: book.net_position
+    }
+  end
 
   defp maybe_parse_intent(socket) do
     action = socket.assigns.trader_action
