@@ -31,6 +31,7 @@ defmodule TradingDesk.ScenarioLive do
       Phoenix.PubSub.subscribe(TradingDesk.PubSub, "live_data")
       Phoenix.PubSub.subscribe(TradingDesk.PubSub, "auto_runner")
       Phoenix.PubSub.subscribe(TradingDesk.PubSub, "solve_pipeline")
+      Phoenix.PubSub.subscribe(TradingDesk.PubSub, "sap_events")
     end
 
     product_group = :ammonia_domestic
@@ -92,6 +93,7 @@ defmodule TradingDesk.ScenarioLive do
       |> assign(:post_solve_impact, nil)
       |> assign(:ammonia_prices, TradingDesk.Data.AmmoniaPrices.price_summary())
       |> assign(:contracts_data, load_contracts_data())
+      |> assign(:api_status, load_api_status())
 
     {:ok, socket}
   end
@@ -308,13 +310,18 @@ defmodule TradingDesk.ScenarioLive do
     tab_atom = String.to_existing_atom(tab)
     socket = assign(socket, :active_tab, tab_atom)
 
-    # Fetch agent history when switching to agent tab
+    # Fetch fresh data when switching to specific tabs
     socket =
-      if tab_atom == :agent do
-        history = TradingDesk.Scenarios.AutoRunner.history()
-        assign(socket, :agent_history, history)
-      else
-        socket
+      case tab_atom do
+        :agent ->
+          history = TradingDesk.Scenarios.AutoRunner.history()
+          assign(socket, :agent_history, history)
+        :apis ->
+          assign(socket, api_status: load_api_status())
+        :contracts ->
+          assign(socket, contracts_data: load_contracts_data())
+        _ ->
+          socket
       end
 
     {:noreply, socket}
@@ -447,9 +454,22 @@ defmodule TradingDesk.ScenarioLive do
   end
 
   @impl true
+  def handle_info({:sap_position_changed, _payload}, socket) do
+    # SAP pushed a position update — refresh API status and contracts data
+    {:noreply, assign(socket, api_status: load_api_status(), contracts_data: load_contracts_data())}
+  end
+
+  @impl true
   def handle_info({:data_updated, _source}, socket) do
     pg = socket.assigns.product_group
     live = LiveState.get()
+
+    # Refresh API status on the APIs tab if it's active
+    socket = if socket.assigns.active_tab == :apis do
+      assign(socket, api_status: load_api_status())
+    else
+      socket
+    end
 
     # Only merge live data for ammonia_domestic (which uses the Variables struct).
     # Other product groups use frame defaults and manual overrides.
@@ -683,7 +703,7 @@ defmodule TradingDesk.ScenarioLive do
         <div style="overflow-y:auto;padding:16px">
           <%!-- Tab buttons --%>
           <div style="display:flex;gap:2px;margin-bottom:16px">
-            <%= for {tab, label, color} <- [{:trader, "Trader", "#38bdf8"}, {:contracts, "Contracts", "#a78bfa"}, {:map, "Map", "#60a5fa"}, {:agent, "Agent", "#10b981"}] do %>
+            <%= for {tab, label, color} <- [{:trader, "Trader", "#38bdf8"}, {:contracts, "Contracts", "#a78bfa"}, {:map, "Map", "#60a5fa"}, {:agent, "Agent", "#10b981"}, {:apis, "APIs", "#f97316"}] do %>
               <button phx-click="switch_tab" phx-value-tab={tab}
                 style={"padding:8px 16px;border:none;border-radius:6px 6px 0 0;font-size:12px;font-weight:600;cursor:pointer;background:#{if @active_tab == tab, do: "#111827", else: "transparent"};color:#{if @active_tab == tab, do: "#e2e8f0", else: "#475569"};border-bottom:2px solid #{if @active_tab == tab, do: color, else: "transparent"}"}>
                 <%= label %>
@@ -1323,6 +1343,194 @@ defmodule TradingDesk.ScenarioLive do
               </div>
             <% end %>
           <% end %>
+
+          <%!-- ═══════ APIs TAB ═══════ --%>
+          <%= if @active_tab == :apis do %>
+            <div style="background:#111827;border-radius:10px;padding:16px">
+              <div style="font-size:12px;font-weight:700;color:#f97316;letter-spacing:1px;margin-bottom:12px">
+                API DATA SOURCES
+              </div>
+
+              <%!-- Data Polling APIs --%>
+              <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:8px">LIVE DATA FEEDS</div>
+              <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:16px">
+                <thead>
+                  <tr style="border-bottom:1px solid #1e293b">
+                    <th style="text-align:left;padding:6px 8px;color:#64748b;font-weight:600">Source</th>
+                    <th style="text-align:left;padding:6px 8px;color:#64748b;font-weight:600">Status</th>
+                    <th style="text-align:right;padding:6px 8px;color:#64748b;font-weight:600">Last Called</th>
+                    <th style="text-align:right;padding:6px 8px;color:#64748b;font-weight:600">Interval</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <%= for api <- @api_status.poller_sources do %>
+                    <tr style="border-bottom:1px solid #0f172a">
+                      <td style="padding:6px 8px;color:#e2e8f0;font-weight:500"><%= api.label %></td>
+                      <td style="padding:6px 8px">
+                        <span style={"display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#{if api.status == :ok, do: "#10b981", else: "#ef4444"}"}>
+                          <span style={"width:6px;height:6px;border-radius:50%;background:#{if api.status == :ok, do: "#10b981", else: "#ef4444"}"}></span>
+                          <%= if api.status == :ok, do: "OK", else: "ERROR" %>
+                        </span>
+                        <%= if api.error do %>
+                          <span style="color:#ef4444;font-size:9px;margin-left:4px">(<%= inspect(api.error) %>)</span>
+                        <% end %>
+                      </td>
+                      <td style="padding:6px 8px;text-align:right;color:#94a3b8;font-family:monospace;font-size:10px">
+                        <%= format_api_timestamp(api.last_poll_at) %>
+                      </td>
+                      <td style="padding:6px 8px;text-align:right;color:#64748b;font-family:monospace;font-size:10px">
+                        <%= format_interval(api.interval_ms) %>
+                      </td>
+                    </tr>
+                  <% end %>
+                </tbody>
+              </table>
+
+              <%!-- SAP Integration --%>
+              <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:8px">SAP S/4HANA OData</div>
+              <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:16px">
+                <thead>
+                  <tr style="border-bottom:1px solid #1e293b">
+                    <th style="text-align:left;padding:6px 8px;color:#64748b;font-weight:600">Endpoint</th>
+                    <th style="text-align:left;padding:6px 8px;color:#64748b;font-weight:600">Status</th>
+                    <th style="text-align:right;padding:6px 8px;color:#64748b;font-weight:600">Last Called</th>
+                    <th style="text-align:right;padding:6px 8px;color:#64748b;font-weight:600">Interval</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr style="border-bottom:1px solid #0f172a">
+                    <td style="padding:6px 8px;color:#e2e8f0;font-weight:500">Position Refresh (GET)</td>
+                    <td style="padding:6px 8px">
+                      <span style={"display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#{if @api_status.sap.sap_connected, do: "#10b981", else: "#f59e0b"}"}>
+                        <span style={"width:6px;height:6px;border-radius:50%;background:#{if @api_status.sap.sap_connected, do: "#10b981", else: "#f59e0b"}"}></span>
+                        <%= if @api_status.sap.sap_connected, do: "CONNECTED", else: "STUB" %>
+                      </span>
+                    </td>
+                    <td style="padding:6px 8px;text-align:right;color:#94a3b8;font-family:monospace;font-size:10px">
+                      <%= format_api_timestamp(@api_status.sap.last_refresh_at) %>
+                    </td>
+                    <td style="padding:6px 8px;text-align:right;color:#64748b;font-family:monospace;font-size:10px">
+                      <%= format_interval(@api_status.sap.refresh_interval_ms) %>
+                    </td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #0f172a">
+                    <td style="padding:6px 8px;color:#e2e8f0;font-weight:500">Create Contract (POST)</td>
+                    <td style="padding:6px 8px">
+                      <span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#f59e0b">
+                        <span style="width:6px;height:6px;border-radius:50%;background:#f59e0b"></span>
+                        STUB
+                      </span>
+                    </td>
+                    <td style="padding:6px 8px;text-align:right;color:#475569;font-family:monospace;font-size:10px">—</td>
+                    <td style="padding:6px 8px;text-align:right;color:#475569;font-family:monospace;font-size:10px">on demand</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #0f172a">
+                    <td style="padding:6px 8px;color:#e2e8f0;font-weight:500">Create Delivery (POST)</td>
+                    <td style="padding:6px 8px">
+                      <span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#f59e0b">
+                        <span style="width:6px;height:6px;border-radius:50%;background:#f59e0b"></span>
+                        STUB
+                      </span>
+                    </td>
+                    <td style="padding:6px 8px;text-align:right;color:#475569;font-family:monospace;font-size:10px">—</td>
+                    <td style="padding:6px 8px;text-align:right;color:#475569;font-family:monospace;font-size:10px">on demand</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #0f172a">
+                    <td style="padding:6px 8px;color:#e2e8f0;font-weight:500">Webhook Ping (POST /api/sap/ping)</td>
+                    <td style="padding:6px 8px">
+                      <span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#10b981">
+                        <span style="width:6px;height:6px;border-radius:50%;background:#10b981"></span>
+                        READY
+                      </span>
+                    </td>
+                    <td style="padding:6px 8px;text-align:right;color:#475569;font-family:monospace;font-size:10px">—</td>
+                    <td style="padding:6px 8px;text-align:right;color:#475569;font-family:monospace;font-size:10px">SAP push</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <%!-- Ammonia Pricing --%>
+              <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:8px">AMMONIA PRICING</div>
+              <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:16px">
+                <thead>
+                  <tr style="border-bottom:1px solid #1e293b">
+                    <th style="text-align:left;padding:6px 8px;color:#64748b;font-weight:600">Source</th>
+                    <th style="text-align:left;padding:6px 8px;color:#64748b;font-weight:600">Status</th>
+                    <th style="text-align:right;padding:6px 8px;color:#64748b;font-weight:600">Last Updated</th>
+                    <th style="text-align:right;padding:6px 8px;color:#64748b;font-weight:600">Interval</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr style="border-bottom:1px solid #0f172a">
+                    <td style="padding:6px 8px;color:#e2e8f0;font-weight:500">Fertecon/FMB Benchmarks</td>
+                    <td style="padding:6px 8px">
+                      <span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#10b981">
+                        <span style="width:6px;height:6px;border-radius:50%;background:#10b981"></span>
+                        SEEDED
+                      </span>
+                    </td>
+                    <td style="padding:6px 8px;text-align:right;color:#94a3b8;font-family:monospace;font-size:10px">
+                      <%= format_api_timestamp(@api_status.prices_updated_at) %>
+                    </td>
+                    <td style="padding:6px 8px;text-align:right;color:#64748b;font-family:monospace;font-size:10px">15m</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <%!-- Claude API --%>
+              <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:8px">AI / LLM</div>
+              <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:16px">
+                <thead>
+                  <tr style="border-bottom:1px solid #1e293b">
+                    <th style="text-align:left;padding:6px 8px;color:#64748b;font-weight:600">Service</th>
+                    <th style="text-align:left;padding:6px 8px;color:#64748b;font-weight:600">Status</th>
+                    <th style="text-align:right;padding:6px 8px;color:#64748b;font-weight:600">Model</th>
+                    <th style="text-align:right;padding:6px 8px;color:#64748b;font-weight:600">Usage</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr style="border-bottom:1px solid #0f172a">
+                    <td style="padding:6px 8px;color:#e2e8f0;font-weight:500">Analyst (Explanations)</td>
+                    <td style="padding:6px 8px">
+                      <span style={"display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#{if @api_status.claude_configured, do: "#10b981", else: "#ef4444"}"}>
+                        <span style={"width:6px;height:6px;border-radius:50%;background:#{if @api_status.claude_configured, do: "#10b981", else: "#ef4444"}"}></span>
+                        <%= if @api_status.claude_configured, do: "CONFIGURED", else: "NO API KEY" %>
+                      </span>
+                    </td>
+                    <td style="padding:6px 8px;text-align:right;color:#94a3b8;font-family:monospace;font-size:10px">claude-sonnet-4-5</td>
+                    <td style="padding:6px 8px;text-align:right;color:#64748b;font-family:monospace;font-size:10px">on solve</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #0f172a">
+                    <td style="padding:6px 8px;color:#e2e8f0;font-weight:500">Intent Mapper</td>
+                    <td style="padding:6px 8px">
+                      <span style={"display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#{if @api_status.claude_configured, do: "#10b981", else: "#ef4444"}"}>
+                        <span style={"width:6px;height:6px;border-radius:50%;background:#{if @api_status.claude_configured, do: "#10b981", else: "#ef4444"}"}></span>
+                        <%= if @api_status.claude_configured, do: "CONFIGURED", else: "NO API KEY" %>
+                      </span>
+                    </td>
+                    <td style="padding:6px 8px;text-align:right;color:#94a3b8;font-family:monospace;font-size:10px">claude-sonnet-4-5</td>
+                    <td style="padding:6px 8px;text-align:right;color:#64748b;font-family:monospace;font-size:10px">on action</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <%!-- Summary --%>
+              <div style="display:flex;gap:16px;padding:12px;background:#0a0f18;border-radius:8px;font-size:11px">
+                <div>
+                  <span style="color:#64748b">Total sources:</span>
+                  <span style="color:#e2e8f0;font-weight:600;margin-left:4px"><%= length(@api_status.poller_sources) + 4 %></span>
+                </div>
+                <div>
+                  <span style="color:#64748b">SAP refreshes:</span>
+                  <span style="color:#f97316;font-weight:600;margin-left:4px"><%= @api_status.sap.refresh_count %></span>
+                </div>
+                <div>
+                  <span style="color:#64748b">Errors:</span>
+                  <span style={"color:#{if @api_status.error_count > 0, do: "#ef4444", else: "#10b981"};font-weight:600;margin-left:4px"}><%= @api_status.error_count %></span>
+                </div>
+              </div>
+            </div>
+          <% end %>
         </div>
       </div>
 
@@ -1621,6 +1829,47 @@ defmodule TradingDesk.ScenarioLive do
       net_position: book.net_position
     }
   end
+
+  defp load_api_status do
+    poller_status = TradingDesk.Data.Poller.status()
+    sap_status = TradingDesk.Contracts.SapRefreshScheduler.status()
+    prices_updated = safe_call(fn -> TradingDesk.Data.AmmoniaPrices.last_updated() end, nil)
+    claude_key = System.get_env("ANTHROPIC_API_KEY")
+
+    error_count = Enum.count(poller_status.sources, & &1.status == :error)
+
+    %{
+      poller_sources: poller_status.sources,
+      sap: sap_status,
+      prices_updated_at: prices_updated,
+      claude_configured: claude_key != nil and claude_key != "",
+      error_count: error_count
+    }
+  end
+
+  defp format_api_timestamp(nil), do: "—"
+  defp format_api_timestamp(%DateTime{} = dt) do
+    now = DateTime.utc_now()
+    diff = DateTime.diff(now, dt, :second)
+
+    cond do
+      diff < 60 -> "#{diff}s ago"
+      diff < 3600 -> "#{div(diff, 60)}m ago"
+      diff < 86400 -> "#{div(diff, 3600)}h #{rem(div(diff, 60), 60)}m ago"
+      true -> Calendar.strftime(dt, "%b %d %H:%M")
+    end
+  end
+  defp format_api_timestamp(_), do: "—"
+
+  defp format_interval(nil), do: "—"
+  defp format_interval(ms) when is_integer(ms) do
+    cond do
+      ms < 60_000 -> "#{div(ms, 1000)}s"
+      ms < 3_600_000 -> "#{div(ms, 60_000)}m"
+      true -> "#{div(ms, 3_600_000)}h"
+    end
+  end
+  defp format_interval(_), do: "—"
 
   defp maybe_parse_intent(socket) do
     action = socket.assigns.trader_action

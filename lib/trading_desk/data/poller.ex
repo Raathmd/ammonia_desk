@@ -53,6 +53,34 @@ defmodule TradingDesk.Data.Poller do
     GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   end
 
+  @doc "Get the status of all polled data sources: last poll time, errors, intervals."
+  def status do
+    GenServer.call(__MODULE__, :status)
+  catch
+    :exit, _ ->
+      %{sources: [], last_poll: %{}, errors: %{}}
+  end
+
+  @impl true
+  def handle_call(:status, _from, state) do
+    sources =
+      @fallback_intervals
+      |> Map.keys()
+      |> Enum.map(fn source ->
+        %{
+          source: source,
+          label: source_label(source),
+          last_poll_at: Map.get(state.last_poll, source),
+          error: Map.get(state.errors, source),
+          interval_ms: get_poll_interval(source),
+          status: if(Map.has_key?(state.errors, source), do: :error, else: :ok)
+        }
+      end)
+      |> Enum.sort_by(& &1.source)
+
+    {:reply, %{sources: sources, last_poll: state.last_poll, errors: state.errors}, state}
+  end
+
   @impl true
   def init(_) do
     # Subscribe to config changes so we can adjust poll intervals
@@ -342,6 +370,17 @@ defmodule TradingDesk.Data.Poller do
       _ -> Map.get(@fallback_intervals, source, :timer.minutes(15))
     end
   end
+
+  defp source_label(:usgs), do: "USGS Water Services"
+  defp source_label(:noaa), do: "NOAA Weather"
+  defp source_label(:usace), do: "USACE Lock Performance"
+  defp source_label(:eia), do: "EIA Natural Gas"
+  defp source_label(:market), do: "Market Prices"
+  defp source_label(:broker), do: "Broker Freight"
+  defp source_label(:internal), do: "Internal Systems"
+  defp source_label(:vessel_tracking), do: "Vessel Tracking"
+  defp source_label(:tides), do: "NOAA Tides"
+  defp source_label(other), do: other |> to_string() |> String.capitalize()
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
