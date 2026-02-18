@@ -12,7 +12,15 @@ defmodule TradingDesk.Solver.Pipeline do
     3. Snapshot active contracts + variable sources (for audit)
     4. Run the LP solve (single or Monte Carlo) with current data
     5. Write audit record (immutable — contract versions, variables, result)
-    6. Return result
+    6. SAP write-back stub (if trader decides to act on solver outcome)
+    7. Return result
+
+  SAP position refresh is NOT part of the solve pipeline. SAP positions
+  are refreshed independently via:
+    - SAP ping webhook (POST /api/sap/ping) — SAP calls this when a
+      contract position changes
+    - SapRefreshScheduler — periodic scheduled refresh
+  The solver uses whatever positions are currently in the Store.
 
   Every pipeline execution writes a `SolveAudit` record capturing exactly
   which contract versions and variable values were used. This enables:
@@ -42,7 +50,7 @@ defmodule TradingDesk.Solver.Pipeline do
       Pipeline.solve(variables, product_group: :ammonia, trigger: :auto_runner)
   """
 
-  alias TradingDesk.Contracts.{ScanCoordinator, NetworkScanner, Store}
+  alias TradingDesk.Contracts.{ScanCoordinator, NetworkScanner, Store, SapPositions}
   alias TradingDesk.Solver.{Port, SolveAudit, SolveAuditStore}
   alias TradingDesk.Data.LiveState
 
@@ -56,7 +64,7 @@ defmodule TradingDesk.Solver.Pipeline do
   # ──────────────────────────────────────────────────────────
 
   @doc """
-  Run the full pipeline: check contracts → ingest changes → solve → audit.
+  Run the full pipeline: check contracts → solve → audit → write-back stub.
 
   Options:
     :product_group   — which contracts to check (default: :ammonia)
@@ -66,6 +74,7 @@ defmodule TradingDesk.Solver.Pipeline do
     :caller_ref      — opaque reference passed through to events
     :trader_id       — who triggered this solve (nil for auto-runner)
     :trigger         — :dashboard | :auto_runner | :api | :scheduled
+    :sap_write_back  — params for SAP write-back after solve (default: nil)
   """
   @spec run(TradingDesk.Variables.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(variables, opts \\ []) do
@@ -77,6 +86,7 @@ defmodule TradingDesk.Solver.Pipeline do
     trader_id = Keyword.get(opts, :trader_id)
     trigger = Keyword.get(opts, :trigger, :dashboard)
     solver_opts = Keyword.get(opts, :solver_opts, [])
+    sap_write_back = Keyword.get(opts, :sap_write_back)
 
     run_id = generate_run_id()
     started_at = DateTime.utc_now()
@@ -114,7 +124,8 @@ defmodule TradingDesk.Solver.Pipeline do
         check_and_ingest_contracts(run_id, product_group, caller_ref, audit)
       end
 
-    # Snapshot active contracts AFTER any ingestion (so we capture the latest versions)
+    # Snapshot active contracts AFTER any ingestion (positions from SAP
+    # are already in the Store, refreshed by the SAP ping/scheduler)
     audit = %{audit |
       contracts_used: SolveAudit.snapshot_active_contracts(product_group),
       contracts_checked_at: if(audit.contracts_checked, do: DateTime.utc_now())
@@ -144,13 +155,17 @@ defmodule TradingDesk.Solver.Pipeline do
             # Write the audit record
             write_audit(audit)
 
+            # Phase 3: SAP write-back stub (if trader wants to push action to SAP)
+            write_back_result = maybe_sap_write_back(sap_write_back, run_id)
+
             broadcast(:pipeline_solve_done, %{
               run_id: run_id,
               mode: mode,
               result: result,
               audit_id: run_id,
               caller_ref: caller_ref,
-              completed_at: completed_at
+              completed_at: completed_at,
+              sap_write_back: write_back_result
             })
 
             {:ok, %{
@@ -207,6 +222,8 @@ defmodule TradingDesk.Solver.Pipeline do
 
             write_audit(audit)
 
+            write_back_result = maybe_sap_write_back(sap_write_back, run_id)
+
             broadcast(:pipeline_solve_done, %{
               run_id: run_id,
               mode: mode,
@@ -214,7 +231,8 @@ defmodule TradingDesk.Solver.Pipeline do
               contracts_stale: true,
               audit_id: run_id,
               caller_ref: caller_ref,
-              completed_at: completed_at
+              completed_at: completed_at,
+              sap_write_back: write_back_result
             })
 
             {:ok, %{
@@ -259,6 +277,30 @@ defmodule TradingDesk.Solver.Pipeline do
 
   def monte_carlo_async(variables, opts \\ []) do
     run_async(variables, Keyword.put(opts, :mode, :monte_carlo))
+  end
+
+  @doc """
+  Create a contract in SAP based on solver outcome.
+
+  This is the pipeline entry point for SAP write-back. The trader
+  reviews a solver result, decides to act, and this pushes the action
+  to SAP as a new contract or delivery.
+
+  Delegates to SapPositions.create_contract/1.
+  Currently a stub — does not call SAP.
+  """
+  def sap_create_contract(params) do
+    SapPositions.create_contract(params)
+  end
+
+  @doc """
+  Create a delivery in SAP under an existing contract.
+
+  Delegates to SapPositions.create_delivery/1.
+  Currently a stub — does not call SAP.
+  """
+  def sap_create_delivery(params) do
+    SapPositions.create_delivery(params)
   end
 
   # ──────────────────────────────────────────────────────────
@@ -363,6 +405,37 @@ defmodule TradingDesk.Solver.Pipeline do
 
   defp execute_solve(variables, product_group, :monte_carlo, n_scenarios, solver_opts) when is_map(variables) do
     Port.monte_carlo(product_group, variables, n_scenarios, solver_opts)
+  end
+
+  # ──────────────────────────────────────────────────────────
+  # PHASE 3: SAP WRITE-BACK STUB
+  # ──────────────────────────────────────────────────────────
+
+  defp maybe_sap_write_back(nil, _run_id), do: nil
+
+  defp maybe_sap_write_back(%{type: :contract} = params, run_id) do
+    Logger.info("Pipeline #{run_id}: SAP write-back — creating contract")
+    case SapPositions.create_contract(Map.put(params, :solver_run_id, run_id)) do
+      {:ok, result} -> result
+      {:error, reason} ->
+        Logger.warning("Pipeline #{run_id}: SAP create_contract failed: #{inspect(reason)}")
+        %{status: :failed, error: reason}
+    end
+  end
+
+  defp maybe_sap_write_back(%{type: :delivery} = params, run_id) do
+    Logger.info("Pipeline #{run_id}: SAP write-back — creating delivery")
+    case SapPositions.create_delivery(Map.put(params, :solver_run_id, run_id)) do
+      {:ok, result} -> result
+      {:error, reason} ->
+        Logger.warning("Pipeline #{run_id}: SAP create_delivery failed: #{inspect(reason)}")
+        %{status: :failed, error: reason}
+    end
+  end
+
+  defp maybe_sap_write_back(params, run_id) do
+    Logger.warning("Pipeline #{run_id}: unknown SAP write-back type: #{inspect(params)}")
+    nil
   end
 
   # ──────────────────────────────────────────────────────────

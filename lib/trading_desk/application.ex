@@ -17,6 +17,7 @@ defmodule TradingDesk.Application do
       TradingDesk.Contracts.Store,
       TradingDesk.Contracts.CurrencyTracker,
       TradingDesk.Contracts.NetworkScanner,
+      TradingDesk.Contracts.SapRefreshScheduler,
       {Task.Supervisor, name: TradingDesk.Contracts.TaskSupervisor},
       TradingDesk.Endpoint
     ]
