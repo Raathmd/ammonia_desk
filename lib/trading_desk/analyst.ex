@@ -53,6 +53,26 @@ defmodule TradingDesk.Analyst do
   end
 
   @doc """
+  Explain a solve result WITH position impact analysis.
+
+  If the trader specified an action, this also produces per-contract impact.
+  Returns {:ok, explanation_text, impact_map} or {:ok, text} or {:error, reason}.
+  """
+  def explain_solve_with_impact(variables, result, intent, trader_action) do
+    # First, get the standard explanation
+    case explain_solve(variables, result) do
+      {:ok, text} ->
+        # Build position impact
+        book = TradingDesk.Contracts.SapPositions.book_summary()
+        impact = build_position_impact(result, book, intent, trader_action)
+        {:ok, text, impact}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
   Explain a Monte Carlo distribution for the trader.
 
   Accepts variables as a `%Variables{}` struct or a plain map.
@@ -321,4 +341,57 @@ defmodule TradingDesk.Analyst do
 
   defp format_number(nil), do: "N/A"
   defp format_number(val), do: to_string(val)
+
+  # ── Position Impact Builder ───────────────────────────────
+
+  defp build_position_impact(result, book, intent, trader_action) do
+    tons_shipped = Map.get(result, :tons) || 0
+
+    by_contract =
+      book.positions
+      |> Enum.sort_by(fn {_k, v} -> v.open_qty_mt end, :desc)
+      |> Enum.map(fn {name, pos} ->
+        # Check if this contract was affected by the intent
+        affected = if intent do
+          Enum.find(intent.affected_contracts || [], fn ac ->
+            String.contains?(String.downcase(name), String.downcase(ac.counterparty || ""))
+          end)
+        end
+
+        impact_text = cond do
+          affected && affected.impact != "" -> affected.impact
+          pos.direction == :sale and tons_shipped > 0 ->
+            "Sale obligation: #{format_number(pos.open_qty_mt)} MT remaining"
+          pos.direction == :purchase and tons_shipped > 0 ->
+            "Supply commitment: #{format_number(pos.open_qty_mt)} MT to lift"
+          true -> "No direct impact from this solve"
+        end
+
+        %{
+          counterparty: name,
+          direction: to_string(pos.direction),
+          incoterm: pos.incoterm |> to_string() |> String.upcase(),
+          open_qty: pos.open_qty_mt,
+          impact: impact_text
+        }
+      end)
+
+    summary = cond do
+      trader_action != nil and trader_action != "" ->
+        "Solved for: \"#{trader_action}\" — " <>
+        "#{format_number(tons_shipped)} MT optimized, " <>
+        "$#{format_number(Map.get(result, :profit))} gross profit"
+      true ->
+        "#{format_number(tons_shipped)} MT optimized across routes, " <>
+        "$#{format_number(Map.get(result, :profit))} gross profit"
+    end
+
+    %{
+      summary: summary,
+      by_contract: by_contract,
+      net_position_before: book.net_position,
+      net_position_after: book.net_position,
+      total_tons_moved: tons_shipped
+    }
+  end
 end

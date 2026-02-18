@@ -82,21 +82,80 @@ defmodule TradingDesk.ScenarioLive do
       |> assign(:contracts_stale, false)
       |> assign(:vessel_data, vessel_data)
       |> assign(:tides_data, tides_data)
+      # Trader intent + pre-solve review
+      |> assign(:trader_action, "")
+      |> assign(:intent, nil)
+      |> assign(:intent_loading, false)
+      |> assign(:show_review, false)
+      |> assign(:review_mode, nil)
+      |> assign(:sap_positions, nil)
+      |> assign(:post_solve_impact, nil)
 
     {:ok, socket}
   end
 
   @impl true
   def handle_event("solve", _params, socket) do
-    socket = assign(socket, solving: true, pipeline_phase: :checking_contracts, pipeline_detail: nil, contracts_stale: false)
-    send(self(), :do_solve)
+    # Show pre-solve review popup instead of solving immediately
+    book = TradingDesk.Contracts.SapPositions.book_summary()
+    socket =
+      socket
+      |> assign(:show_review, true)
+      |> assign(:review_mode, :solve)
+      |> assign(:sap_positions, book)
+    # If trader has typed an action, parse intent in background
+    socket = maybe_parse_intent(socket)
     {:noreply, socket}
   end
 
   @impl true
   def handle_event("monte_carlo", _params, socket) do
-    socket = assign(socket, solving: true, pipeline_phase: :checking_contracts, pipeline_detail: nil, contracts_stale: false)
-    send(self(), :do_monte_carlo)
+    book = TradingDesk.Contracts.SapPositions.book_summary()
+    socket =
+      socket
+      |> assign(:show_review, true)
+      |> assign(:review_mode, :monte_carlo)
+      |> assign(:sap_positions, book)
+    socket = maybe_parse_intent(socket)
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("update_action", %{"action" => text}, socket) do
+    {:noreply, assign(socket, :trader_action, text)}
+  end
+
+  @impl true
+  def handle_event("confirm_solve", _params, socket) do
+    # Apply intent variable adjustments if any, then solve
+    vars = apply_intent_adjustments(socket.assigns.current_vars, socket.assigns.intent)
+    mode = socket.assigns.review_mode
+
+    socket =
+      socket
+      |> assign(:current_vars, vars)
+      |> assign(:show_review, false)
+      |> assign(:solving, true)
+      |> assign(:pipeline_phase, :checking_contracts)
+      |> assign(:pipeline_detail, nil)
+      |> assign(:contracts_stale, false)
+      |> assign(:post_solve_impact, nil)
+
+    case mode do
+      :monte_carlo -> send(self(), :do_monte_carlo)
+      _ -> send(self(), :do_solve)
+    end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("cancel_review", _params, socket) do
+    socket =
+      socket
+      |> assign(:show_review, false)
+      |> assign(:review_mode, nil)
+      |> assign(:intent, nil)
     {:noreply, socket}
   end
 
@@ -320,11 +379,19 @@ defmodule TradingDesk.ScenarioLive do
       explaining: true
     )
     vars = socket.assigns.current_vars
+    intent = socket.assigns.intent
+    trader_action = socket.assigns.trader_action
     lv_pid = self()
+
+    # Spawn explanation + post-solve impact analysis
     spawn(fn ->
       try do
-        case TradingDesk.Analyst.explain_solve(vars, result) do
-          {:ok, text} -> send(lv_pid, {:explanation_result, text})
+        case TradingDesk.Analyst.explain_solve_with_impact(vars, result, intent, trader_action) do
+          {:ok, text, impact} ->
+            send(lv_pid, {:explanation_result, text})
+            send(lv_pid, {:post_solve_impact, impact})
+          {:ok, text} ->
+            send(lv_pid, {:explanation_result, text})
           {:error, reason} ->
             Logger.warning("Analyst explain_solve failed: #{inspect(reason)}")
             send(lv_pid, {:explanation_result, {:error, reason}})
@@ -432,6 +499,16 @@ defmodule TradingDesk.ScenarioLive do
   end
 
   @impl true
+  def handle_info({:intent_result, intent}, socket) do
+    {:noreply, assign(socket, intent: intent, intent_loading: false)}
+  end
+
+  @impl true
+  def handle_info({:post_solve_impact, impact}, socket) do
+    {:noreply, assign(socket, post_solve_impact: impact)}
+  end
+
+  @impl true
   def handle_info({:explanation_result, {:error, reason}}, socket) do
     error_text = analyst_error_text(reason)
     {:noreply, assign(socket, explanation: {:error, error_text}, explaining: false)}
@@ -522,6 +599,13 @@ defmodule TradingDesk.ScenarioLive do
           <% end %>
 
           <div style="border-top:1px solid #1b2838;padding-top:12px;margin-top:8px">
+            <%!-- Trader Action Input --%>
+            <div style="margin-bottom:10px">
+              <div style="font-size:10px;color:#a78bfa;letter-spacing:0.8px;margin-bottom:4px">TRADER ACTION</div>
+              <textarea phx-blur="update_action" name="action"
+                placeholder="Describe what you want to test... e.g. 'Redirect March Yuzhnyy cargo to India' or 'Simulate river drop to 15ft'"
+                style="width:100%;background:#0a0f18;border:1px solid #1e293b;color:#c8d6e5;padding:8px;border-radius:6px;font-size:11px;font-family:inherit;resize:vertical;min-height:48px;max-height:120px"><%= @trader_action %></textarea>
+            </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
               <button phx-click="solve" disabled={@solving}
                 style="padding:10px;border:none;border-radius:6px;font-weight:700;font-size:12px;background:linear-gradient(135deg,#0891b2,#06b6d4);color:#fff;cursor:pointer;letter-spacing:1px">
@@ -840,6 +924,43 @@ defmodule TradingDesk.ScenarioLive do
             <% end %>
           <% end %>
 
+          <%!-- Post-solve impact --%>
+            <%= if @post_solve_impact do %>
+              <div style="background:#0d1a0d;border:1px solid #166534;border-radius:8px;padding:14px;margin-bottom:16px">
+                <div style="font-size:11px;color:#4ade80;font-weight:700;letter-spacing:1px;margin-bottom:8px">POSITION IMPACT</div>
+                <%= if @post_solve_impact[:summary] do %>
+                  <div style="font-size:12px;color:#c8d6e5;line-height:1.5;margin-bottom:10px"><%= @post_solve_impact[:summary] %></div>
+                <% end %>
+                <%= if @post_solve_impact[:by_contract] do %>
+                  <table style="width:100%;border-collapse:collapse;font-size:11px">
+                    <thead><tr style="border-bottom:1px solid #1e293b">
+                      <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Counterparty</th>
+                      <th style="text-align:center;padding:4px 6px;color:#64748b;font-size:10px">Dir</th>
+                      <th style="text-align:right;padding:4px 6px;color:#64748b;font-size:10px">Open Qty</th>
+                      <th style="text-align:left;padding:4px 6px;color:#64748b;font-size:10px">Impact</th>
+                    </tr></thead>
+                    <tbody>
+                      <%= for cp <- @post_solve_impact[:by_contract] do %>
+                        <tr style="border-bottom:1px solid #1e293b11">
+                          <td style="padding:4px 6px;font-weight:600;color:#e2e8f0"><%= cp[:counterparty] %></td>
+                          <td style={"text-align:center;padding:4px 6px;color:#{if cp[:direction] == "purchase", do: "#60a5fa", else: "#f59e0b"};font-size:10px;font-weight:600"}><%= if cp[:direction] == "purchase", do: "BUY", else: "SELL" %></td>
+                          <td style="text-align:right;padding:4px 6px;font-family:monospace;color:#c8d6e5"><%= format_number(cp[:open_qty] || 0) %></td>
+                          <td style="padding:4px 6px;color:#94a3b8;font-size:10px"><%= cp[:impact] %></td>
+                        </tr>
+                      <% end %>
+                    </tbody>
+                  </table>
+                <% end %>
+                <%= if @post_solve_impact[:net_position_after] do %>
+                  <div style="margin-top:8px;padding-top:8px;border-top:1px solid #166534;font-size:11px;color:#94a3b8">
+                    Net position after: <span style={"font-weight:700;color:#{if @post_solve_impact[:net_position_after] > 0, do: "#4ade80", else: "#f87171"}"}>
+                      <%= if @post_solve_impact[:net_position_after] > 0, do: "+", else: "" %><%= format_number(@post_solve_impact[:net_position_after]) %> MT
+                    </span>
+                  </div>
+                <% end %>
+              </div>
+            <% end %>
+
           <%!-- === AGENT TAB === --%>
           <%= if @active_tab == :agent do %>
             <%= if @auto_result do %>
@@ -1080,6 +1201,137 @@ defmodule TradingDesk.ScenarioLive do
           <% end %>
         </div>
       </div>
+
+      <%!-- === PRE-SOLVE REVIEW POPUP === --%>
+      <%= if @show_review do %>
+        <div style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center"
+             phx-click="cancel_review">
+          <div style="background:#111827;border:1px solid #1e293b;border-radius:12px;padding:24px;width:640px;max-height:80vh;overflow-y:auto;box-shadow:0 25px 50px rgba(0,0,0,0.5)"
+               phx-click-away="cancel_review">
+
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+              <span style="font-size:14px;font-weight:700;color:#e2e8f0;letter-spacing:1px">
+                PRE-SOLVE REVIEW — <%= if @review_mode == :monte_carlo, do: "MONTE CARLO", else: "SOLVE" %>
+              </span>
+              <button phx-click="cancel_review" style="background:none;border:none;color:#64748b;cursor:pointer;font-size:16px">X</button>
+            </div>
+
+            <%!-- Trader Action --%>
+            <%= if @trader_action != "" do %>
+              <div style="background:#0a0f18;border-radius:8px;padding:12px;margin-bottom:12px;border-left:3px solid #a78bfa">
+                <div style="font-size:10px;color:#a78bfa;letter-spacing:1px;margin-bottom:4px">TRADER ACTION</div>
+                <div style="font-size:13px;color:#e2e8f0;font-style:italic">"<%= @trader_action %>"</div>
+              </div>
+            <% end %>
+
+            <%!-- Intent Mapping --%>
+            <%= if @intent_loading do %>
+              <div style="font-size:12px;color:#64748b;padding:8px 0">Mapping intent to variables...</div>
+            <% end %>
+            <%= if @intent do %>
+              <div style="background:#0a0f18;border-radius:8px;padding:12px;margin-bottom:12px">
+                <div style="font-size:10px;color:#38bdf8;letter-spacing:1px;margin-bottom:4px">AI INTERPRETATION</div>
+                <div style="font-size:12px;color:#c8d6e5;margin-bottom:8px"><%= @intent.summary %></div>
+
+                <%= if map_size(@intent.variable_adjustments) > 0 do %>
+                  <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:4px;margin-top:8px">VARIABLE CHANGES</div>
+                  <%= for {key, val} <- @intent.variable_adjustments do %>
+                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0">
+                      <span style="color:#94a3b8"><%= key %></span>
+                      <span style="color:#f59e0b;font-family:monospace"><%= Map.get(@current_vars, key) %> -> <%= val %></span>
+                    </div>
+                  <% end %>
+                <% end %>
+
+                <%= if length(@intent.affected_contracts) > 0 do %>
+                  <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:4px;margin-top:8px">AFFECTED CONTRACTS</div>
+                  <%= for ac <- @intent.affected_contracts do %>
+                    <div style="font-size:11px;padding:3px 0;border-bottom:1px solid #1e293b11">
+                      <span style={"font-weight:600;color:#{if ac.direction == "purchase", do: "#60a5fa", else: "#f59e0b"}"}><%= ac.counterparty %></span>
+                      <span style="color:#64748b;margin-left:4px">— <%= ac.impact %></span>
+                    </div>
+                  <% end %>
+                <% end %>
+
+                <%= if length(@intent.risk_notes) > 0 do %>
+                  <div style="font-size:10px;color:#ef4444;letter-spacing:1px;margin-bottom:4px;margin-top:8px">RISK ALERTS</div>
+                  <%= for note <- @intent.risk_notes do %>
+                    <div style="font-size:11px;color:#fca5a5;padding:2px 0"><%= note %></div>
+                  <% end %>
+                <% end %>
+              </div>
+            <% end %>
+
+            <%!-- Open Book Positions --%>
+            <%= if @sap_positions do %>
+              <div style="background:#0a0f18;border-radius:8px;padding:12px;margin-bottom:12px">
+                <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:6px">OPEN BOOK (SAP)</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+                  <div style="text-align:center">
+                    <div style="font-size:9px;color:#64748b">Purchase Open</div>
+                    <div style="font-size:14px;font-weight:700;color:#60a5fa;font-family:monospace"><%= format_number(@sap_positions.total_purchase_open) %></div>
+                  </div>
+                  <div style="text-align:center">
+                    <div style="font-size:9px;color:#64748b">Sale Open</div>
+                    <div style="font-size:14px;font-weight:700;color:#f59e0b;font-family:monospace"><%= format_number(@sap_positions.total_sale_open) %></div>
+                  </div>
+                  <div style="text-align:center">
+                    <div style="font-size:9px;color:#64748b">Net Position</div>
+                    <div style={"font-size:14px;font-weight:700;font-family:monospace;color:#{if @sap_positions.net_position > 0, do: "#4ade80", else: "#f87171"}"}><%= if @sap_positions.net_position > 0, do: "+", else: "" %><%= format_number(@sap_positions.net_position) %></div>
+                  </div>
+                </div>
+                <table style="width:100%;border-collapse:collapse;font-size:10px">
+                  <thead><tr style="border-bottom:1px solid #1e293b">
+                    <th style="text-align:left;padding:3px 4px;color:#475569">Counterparty</th>
+                    <th style="text-align:center;padding:3px 4px;color:#475569">Dir</th>
+                    <th style="text-align:center;padding:3px 4px;color:#475569">Incoterm</th>
+                    <th style="text-align:right;padding:3px 4px;color:#475569">Contract</th>
+                    <th style="text-align:right;padding:3px 4px;color:#475569">Delivered</th>
+                    <th style="text-align:right;padding:3px 4px;color:#475569">Open</th>
+                  </tr></thead>
+                  <tbody>
+                    <%= for {name, pos} <- Enum.sort_by(@sap_positions.positions, fn {_k, v} -> v.open_qty_mt end, :desc) do %>
+                      <tr style="border-bottom:1px solid #1e293b11">
+                        <td style="padding:3px 4px;color:#c8d6e5;font-weight:600"><%= name %></td>
+                        <td style={"text-align:center;padding:3px 4px;color:#{if pos.direction == :purchase, do: "#60a5fa", else: "#f59e0b"};font-weight:600"}><%= if pos.direction == :purchase, do: "BUY", else: "SELL" %></td>
+                        <td style="text-align:center;padding:3px 4px;color:#94a3b8"><%= pos.incoterm |> to_string() |> String.upcase() %></td>
+                        <td style="text-align:right;padding:3px 4px;font-family:monospace;color:#94a3b8"><%= format_number(pos.total_qty_mt) %></td>
+                        <td style="text-align:right;padding:3px 4px;font-family:monospace;color:#64748b"><%= format_number(pos.delivered_qty_mt) %></td>
+                        <td style="text-align:right;padding:3px 4px;font-family:monospace;color:#e2e8f0;font-weight:600"><%= format_number(pos.open_qty_mt) %></td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              </div>
+            <% end %>
+
+            <%!-- Key Variables Summary --%>
+            <div style="background:#0a0f18;border-radius:8px;padding:12px;margin-bottom:16px">
+              <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:6px">CURRENT VARIABLES</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;font-size:11px">
+                <%= for meta <- Enum.take(Enum.filter(@metadata, & Map.get(&1, :type) != :boolean), 12) do %>
+                  <div style="display:flex;justify-content:space-between;padding:2px 4px">
+                    <span style="color:#64748b;font-size:10px"><%= meta.label %></span>
+                    <span style={"color:#{if MapSet.member?(@overrides, meta.key), do: "#f59e0b", else: "#94a3b8"};font-family:monospace;font-size:10px"}><%= format_var(meta, Map.get(@current_vars, meta.key)) %></span>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+
+            <%!-- Action buttons --%>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <button phx-click="cancel_review"
+                style="padding:12px;border:1px solid #1e293b;border-radius:8px;background:transparent;color:#94a3b8;font-weight:700;font-size:13px;cursor:pointer;letter-spacing:1px">
+                CANCEL
+              </button>
+              <button phx-click="confirm_solve"
+                style={"padding:12px;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;letter-spacing:1px;color:#fff;background:linear-gradient(135deg,#{if @review_mode == :monte_carlo, do: "#7c3aed,#8b5cf6", else: "#0891b2,#06b6d4"})"}>
+                CONFIRM <%= if @review_mode == :monte_carlo, do: "MONTE CARLO", else: "SOLVE" %>
+              </button>
+            </div>
+          </div>
+        </div>
+      <% end %>
     </div>
     """
   end
@@ -1194,6 +1446,32 @@ defmodule TradingDesk.ScenarioLive do
     |> String.trim_leading(",")
   end
   defp format_number(val), do: to_string(val)
+
+  defp maybe_parse_intent(socket) do
+    action = socket.assigns.trader_action
+    if action != nil and String.trim(action || "") != "" do
+      lv_pid = self()
+      vars = socket.assigns.current_vars
+      pg = socket.assigns.product_group
+      spawn(fn ->
+        case TradingDesk.IntentMapper.parse_intent(action, vars, pg) do
+          {:ok, intent} -> send(lv_pid, {:intent_result, intent})
+          {:error, _} -> send(lv_pid, {:intent_result, nil})
+        end
+      end)
+      assign(socket, :intent_loading, true)
+    else
+      socket
+    end
+  end
+
+  defp apply_intent_adjustments(vars, nil), do: vars
+  defp apply_intent_adjustments(vars, %{variable_adjustments: adj}) when map_size(adj) > 0 do
+    Enum.reduce(adj, vars, fn {key, val}, acc ->
+      if Map.has_key?(acc, key), do: Map.put(acc, key, val), else: acc
+    end)
+  end
+  defp apply_intent_adjustments(vars, _), do: vars
 
   defp parse_value(_key, "true"), do: true
   defp parse_value(_key, "false"), do: false
