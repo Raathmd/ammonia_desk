@@ -1,0 +1,86 @@
+Sale Contract for Barge, Rail and Trucks
+
+Contract No.: TRAMMO-MM-2026-0007
+Date: January 20, 2026
+
+BETWEEN:
+Trammo, Inc. — Ammonia Division ("Seller")
+AND:
+CF Industries Holdings, Inc. ("Buyer")
+
+TRAMMO GENERAL TERMS AND CONDITIONS (SALES)
+
+1. PRODUCT AND SPECIFICATIONS
+
+Product: Anhydrous Ammonia
+Specifications: Minimum purity 99.5%, water content maximum 0.3%,
+oil content maximum 5 ppm.
+
+2. INCOTERMS
+
+INCOTERMS 2020: FOB Seller's barge loading terminal, Donaldsonville, Louisiana,
+or CPT Buyer's designated rail terminal, per individual shipment basis.
+
+3. PRICE
+
+Price: US $405.00 per metric ton for barge deliveries. Rail deliveries at
+$415.00 per metric ton. All prices are fixed price per shipment.
+
+4. PAYMENT
+
+Payment: By telegraphic transfer within 30 days from bill of lading date for
+barge shipments, or 30 days from delivery date for rail/truck deliveries.
+
+5. INSPECTION AND QUANTITY DETERMINATION
+
+Inspection: An independent inspector appointed by Seller at loading point.
+Bill of lading quantity shall be final and binding for barge shipments.
+Certified scale weight at delivery point for truck shipments. Flow meter
+readings for rail car deliveries.
+
+6. LAYTIME AND DEMURRAGE
+
+Laytime: Barge laytime shall be 36 running hours from time of NOR.
+Demurrage: $8,000 per day or pro rata for barge demurrage. Rail car
+detention charges per railroad tariff. Truck free hours: 2 hours from
+arrival, then $100 per hour.
+
+7. FORCE MAJEURE
+
+Force Majeure: Neither party shall be liable for delays caused by Force
+Majeure events including but not limited to: floods, hurricanes, lock
+closures, rail embargoes, government orders, labor disputes, or equipment
+failure beyond reasonable control. Notice within 3 days.
+
+8. DEFAULT AND REMEDIES
+
+Event of Default: Material default not remedied within 48 hours of notice
+entitles termination. Interest at 2% per annum on late payments. Mutual
+right of setoff and netting is preserved.
+
+9. DISCLAIMER OF WARRANTIES
+
+Disclaimer of Warranties: SELLER MAKES NO WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY.
+
+10. CLAIMS
+
+Claims: Written notice of claim within 30 days of delivery. Claims shall
+be absolutely barred unless action is commenced within one year from date
+of delivery.
+
+11. GOVERNING LAW AND ARBITRATION
+
+Governing Law: Laws of the State of New York shall govern this contract.
+Arbitration: Disputes shall be settled by arbitration under SMA rules
+in New York.
+
+12. NOTICES
+
+Notices: Notices deemed to be given when sent by courier, fax, or e-mail.
+
+13. MISCELLANEOUS
+
+Miscellaneous: Entire Agreement of the parties. Modifications in writing
+only. No Waiver of breach implies waiver of future breach. Assignment
+requires consent. Severability applies.

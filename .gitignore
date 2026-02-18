@@ -20,7 +20,7 @@ erl_crash.dump
 *.ez
 
 # Ignore package tarball (built via "mix hex.build").
-ammonia_desk-*.tar
+trading_desk-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
@@ -32,6 +32,9 @@ ammonia_desk-*.tar
 /native/solver
 /native/**/*.o
 /native/priv/
+/native/HiGHS/build/
+/native/HiGHS/**/*.o
+/native/HiGHS/**/*.a
 
 # Temporary files
 new_render.txt

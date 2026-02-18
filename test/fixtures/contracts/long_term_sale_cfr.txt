@@ -1,0 +1,139 @@
+ANHYDROUS AMMONIA SALES CONTRACT
+
+Contract No.: TRAMMO-LT-2026-0003
+Date: December 1, 2025
+Effective: January 1, 2026
+
+BETWEEN:
+Trammo SAS ("Seller")
+AND:
+BASF SE ("Buyer")
+
+LONG TERM CFR AMMONIA SALES AGREEMENT
+
+1. PRODUCT AND SPECIFICATIONS
+
+Product: Anhydrous Ammonia (NH3)
+Specifications: Purity minimum 99.8%, water maximum 0.15%, oil maximum 3 ppm.
+Temperature at loading: minus 33 degrees Celsius.
+
+2. QUANTITY
+
+Annual Quantity: 120,000 metric tons per year +/- 10% more or less at
+buyer's option. Individual shipment size: approximately 20,000 metric tons
+per shipment.
+
+Shipping tolerance: Each shipment shall be 20,000 metric tons +/- 5%.
+
+3. INCOTERMS
+
+INCOTERMS 2020: CFR Ludwigshafen, Germany (via Rhine barge ex seagoing vessel).
+
+4. SHIPMENTS AND NOMINATIONS
+
+Shipments / nominations: Buyer shall nominate quantities quarterly. Within each
+quarter, nominations shall be spread as evenly as practicable across the months.
+Nominations and Notices: Buyer shall provide nomination for each quarter no later
+than 45 days prior to the start of the quarter. Individual vessel nominations
+require 20 days prior notice.
+
+5. PRICE
+
+The price for the first calendar year shall be the average of the Fertecon and
+FMB (Fertilizer Market Bulletin) Northwest Europe ammonia price assessments for
+the month preceding delivery. Price will be agreed for subsequent years based on
+the same index methodology.
+
+EU duty adjustment formula: CFR price divided by 0.9419 for non-duty-free origins.
+
+6. PAYMENT
+
+Payment: By irrevocable letter of credit, payable at sight, or by telegraphic
+transfer within 30 days from bill of lading date if creditworthy counterparty.
+
+7. LAYTIME AND DEMURRAGE
+
+Discharge Rate and Demurrage: Discharge rate 600 mt per hour. Laytime calculated
+as B/L quantity divided by discharge rate. Demurrage $32,000 per day or pro rata.
+Claims within 90 calendar days from completion of discharge.
+
+8. CHARTER PARTY
+
+ASBATANKVOY Charter Party form is incorporated by reference herein. Seller is
+deemed as "owner" and Buyer as "charterer."
+
+9. LETTER OF INDEMNITY
+
+LOI: Seller may deliver cargo without presentation of an original Bill of Lading
+upon issuance of a Letter of Indemnity in P&I Club standard form.
+
+10. TAXES, FEES AND DUES
+
+Taxes, Fees and Dues: Import duties, VAT, and all taxes at destination shall be
+added to the sale price. Export taxes at origin are for Seller's account.
+Buyer is responsible for all import duty responsibility and customs clearance.
+
+11. COMPLIANCE WITH EXPORT AND IMPORT LAWS
+
+Compliance with Import Laws: Import of ammonia into Germany is not prohibited.
+REACH registration maintained (EC No. 231-635-3). Safety Data Sheet provided
+annually or upon request.
+
+12. WAR RISK
+
+War Risk: Costs arising from transit through Joint War Committee listed areas
+shall be for Buyer's account. In the event of Main Shipping Routes Closure
+affecting the agreed route, either party may request alternate routing or
+suspension of deliveries.
+
+13. FORCE MAJEURE
+
+Force Majeure: Neither party shall be liable for failure to perform due to
+Force Majeure events beyond reasonable control. The affected party must notify
+the other within 7 days notice. If Force Majeure continues for more than 90
+days, either party may cancel the affected shipments.
+
+14. DEFAULT AND REMEDIES
+
+Event of Default: Material breach not remedied within 48 hours of notice
+entitles termination of the entire agreement. Interest on overdue payments
+at 2% per annum above EURIBOR. Right of setoff and netting under this and
+all related agreements is fully preserved.
+
+15. EXCLUSION OF WARRANTIES
+
+Disclaimer of Warranties: SELLER MAKES NO WARRANTY, EXPRESS OR IMPLIED,
+INCLUDING WARRANTIES OF MERCHANTABILITY OR FITNESS FOR PURPOSE.
+
+16. CLAIMS
+
+Claims: Written notice of any claim within 15 days of discharge completion.
+Claims absolutely barred unless arbitration commenced within one year.
+
+17. GOVERNING LAW AND ARBITRATION
+
+Governing Law: English law shall apply.
+Arbitration: All disputes under LMAA terms in London.
+
+18. NOTICES
+
+Notices: All notices deemed to be given when delivered by courier, fax,
+or e-mail to registered addresses.
+
+19. MISCELLANEOUS
+
+Miscellaneous: This constitutes the Entire Agreement. Modifications in
+writing only. Waiver of one breach not a continuing waiver. Assignment
+with prior written consent. Severability of invalid provisions.
+
+20. HARDSHIP
+
+Hardship: If the fundamental equilibrium of this contract is substantially
+altered due to unforeseen circumstances, either party may request renegotiation
+in good faith.
+
+21. REPRESENTATIONS AND WARRANTIES
+
+Representations and Warranties: Each party represents that it has full
+corporate power and authority to enter into this agreement and perform its
+obligations hereunder.

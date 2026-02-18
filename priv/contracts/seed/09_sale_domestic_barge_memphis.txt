@@ -1,0 +1,109 @@
+Sale Contract for Barge, Rail and Trucks
+
+Contract No.: TRAMMO-DS-2026-0109
+Date: January 5, 2026
+Effective: January 1, 2026
+Term: January 1, 2026 through December 31, 2026
+
+BETWEEN:
+Trammo, Inc. — Ammonia Division ("Seller")
+AND:
+Koch Fertilizer LLC — Memphis Operations ("Buyer")
+
+TRAMMO GENERAL TERMS AND CONDITIONS (SALES)
+
+1. PRODUCT AND SPECIFICATIONS
+
+Product: Anhydrous Ammonia
+Specifications: Minimum purity 99.5%, water content maximum 0.5%,
+oil content maximum 5 ppm.
+
+2. QUANTITY
+
+Quarterly Quantity: 4,000 metric tons per quarter +/- 10% more or less
+at buyer's option. Annual total: 16,000 metric tons. Individual barge lots
+of approximately 1,500 metric tons each. Minimum of two (2) barge lots
+per quarter.
+
+3. INCOTERMS
+
+INCOTERMS 2020: FOB Seller's barge loading terminal, Donaldsonville, Louisiana,
+or FOB Geismar, Louisiana, at Seller's option.
+
+4. PRICE
+
+Price: US $390.00 per metric ton FOB barge. Price subject to quarterly
+adjustment linked to NOLA barge index published by Fertecon. Price floor
+of $355.00 per metric ton.
+
+5. SHIPMENTS AND NOMINATIONS
+
+Shipments / nominations: Buyer shall nominate individual barge lots with
+7 days prior notice. Buyer shall provide quarterly nomination 15 days
+before start of each quarter.
+
+6. PAYMENT
+
+Payment: By telegraphic transfer within 20 days from bill of lading date.
+Late payment interest at 1.5% per annum above SOFR.
+
+7. INSPECTION AND QUANTITY DETERMINATION
+
+Inspection: Bill of lading quantity shall be final and binding for barge
+shipments. Certified shore tank gauging at Seller's terminal.
+
+8. LAYTIME AND DEMURRAGE
+
+Laytime: Barge laytime shall be 30 running hours from time of NOR.
+Demurrage: $7,000 per day or pro rata for barge demurrage. Demurrage
+claims must be submitted within 60 calendar days from completion of
+loading.
+
+9. FORCE MAJEURE
+
+Force Majeure: Neither party shall be liable for delays caused by Force
+Majeure events including but not limited to: floods, hurricanes, lock
+closures, river stage below 9 feet at Cairo gauge, ice conditions,
+government orders, labor disputes, or equipment failure beyond reasonable
+control. Notice within 3 days. River stage below 9 feet at Cairo gauge
+or ice closure of the Upper Mississippi shall entitle either party to
+suspend barge deliveries without penalty.
+
+10. DEFAULT AND REMEDIES
+
+Event of Default: Material default not remedied within 48 hours of notice
+entitles termination. Interest at 1.5% per annum on late payments. Mutual
+right of setoff and netting is preserved.
+
+Penalty for volume shortfall: If Seller fails to deliver the minimum
+quarterly quantity (net of tolerance), Seller shall pay Buyer $10.00 per
+metric ton on the shortfall volume. If Buyer fails to accept the minimum
+quarterly quantity, Buyer shall pay Seller $8.00 per metric ton on the
+shortfall.
+
+11. DISCLAIMER OF WARRANTIES
+
+Disclaimer of Warranties: SELLER MAKES NO WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY.
+
+12. CLAIMS
+
+Claims: Written notice of claim within 30 days of delivery. Claims shall
+be absolutely barred unless action is commenced within one year from date
+of delivery.
+
+13. GOVERNING LAW AND ARBITRATION
+
+Governing Law: Laws of the State of New York shall govern this contract.
+Arbitration: Disputes shall be settled by arbitration under SMA rules
+in New York.
+
+14. NOTICES
+
+Notices: Notices deemed to be given when sent by courier, fax, or e-mail.
+
+15. MISCELLANEOUS
+
+Miscellaneous: Entire Agreement of the parties. Modifications in writing
+only. No Waiver of breach implies waiver of future breach. Assignment
+requires consent. Severability applies.
