@@ -221,7 +221,7 @@ Branch to create: `claude/contract-parsing-setup-Yt0za` from `main`.
 
 ### 7.1 DeltaConfig (`config/delta_config.ex`)
 - Admin-configurable per-product-group: thresholds, poll intervals, cooldown, MC scenarios
-- Persisted to Postgres, changes broadcast via PubSub
+- Persisted to SQLite, changes broadcast via PubSub
 - 20 variable thresholds (river_stage: 0.5ft, lock_hrs: 2.0hrs, temp_f: 5.0°F, etc.)
 - Default cooldown: 5 minutes, default scenarios: 1000
 
@@ -248,17 +248,18 @@ Branch to create: `claude/contract-parsing-setup-Yt0za` from `main`.
 
 ## 9. PERSISTENCE
 
-### 9.1 Postgres via Ecto
-- Repo module with Postgres adapter
+### 9.1 SQLite via Ecto
+- Repo module with SQLite adapter (ecto_sqlite3)
 - Schemas: ContractRecord, SolveAuditRecord, SolveAuditContract (join), ScenarioRecord
-- Tables: contracts, solve_audits (JSONB), solve_audit_contracts, scenarios
-- DB.Writer: async persistence from ETS to Postgres
+- Tables: contracts, solve_audits (JSON text), solve_audit_contracts, scenarios
+- DB.Writer: async persistence from ETS to SQLite
+- WAL mode enabled for concurrent reads during writes
 
 ### 9.2 Snapshot WAL
 - Append-only WAL files, daily rotation
 - Length-prefixed ETF frames with MD5 hash chain (tamper-evident)
 - Synchronous fsync on every write
-- SnapshotRestore: restore_postgres, restore_ets, fill_gaps, verify_all
+- SnapshotRestore: restore_sqlite, restore_ets, fill_gaps, verify_all
 
 ---
 
@@ -396,7 +397,7 @@ Sale side:
 - `/api/sap/status` → SAP health check
 
 ### 14.4 Dependencies
-- ecto_sql + postgrex (Postgres)
+- ecto_sql + ecto_sqlite3 (SQLite with WAL mode)
 - req (HTTP client)
 - jason (JSON)
 - phoenix_live_view
