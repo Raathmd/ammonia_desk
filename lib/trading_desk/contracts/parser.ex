@@ -5,7 +5,7 @@ defmodule TradingDesk.Contracts.Parser do
   No external API calls. No LLM. Every extracted value has a confidence score
   and a reference back to the original text.
 
-  Extracts all 28 canonical clause types from the template inventory.
+  Extracts all 30 canonical clause types from the template inventory.
   Each clause is identified by its canonical clause_id and matched using
   the anchor patterns defined in TemplateRegistry.
 
@@ -156,6 +156,16 @@ defmodule TradingDesk.Contracts.Parser do
     {"FORCE_MAJEURE",
      [~r/\bForce\s+Majeure\b/i]},
 
+    # Penalty sub-clauses — extracted from DEFAULT_AND_REMEDIES sections
+    # that contain "Penalty for volume shortfall" / "Penalty for late delivery"
+    {"PENALTY_VOLUME_SHORTFALL",
+     [~r/\b[Pp]enalty\s+for\s+volume\s+shortfall\b/i,
+      ~r/\bshortfall\s+volume\b.*\$\s*[\d,]+/i]},
+    {"PENALTY_LATE_DELIVERY",
+     [~r/\b[Pp]enalty\s+for\s+late\s+delivery\b/i,
+      ~r/\blate\s+delivery\b.*\$\s*[\d,]+/i,
+      ~r/\bdelayed\s+(?:cargo|volume)\b.*\$\s*[\d,]+/i]},
+
     # Credit/legal
     {"DEFAULT_AND_REMEDIES",
      [~r/\b[Ee]vent\s+of\s+[Dd]efault\b/i,
@@ -225,7 +235,14 @@ defmodule TradingDesk.Contracts.Parser do
         end
       end)
 
-    clauses = Enum.reverse(clauses) |> deduplicate()
+    # Second pass: extract embedded penalty sub-clauses from sections that
+    # matched DEFAULT_AND_REMEDIES. The "Penalty for volume shortfall" and
+    # "Penalty for late delivery" paragraphs get merged into the same section
+    # as "Event of Default" by the heading merger, so the first pass only
+    # extracts DEFAULT_AND_REMEDIES. This pass finds and extracts them.
+    penalty_clauses = extract_embedded_penalties(paragraphs, now)
+
+    clauses = (Enum.reverse(clauses) ++ penalty_clauses) |> deduplicate()
     warnings = Enum.reverse(warnings)
     detected_family = TemplateRegistry.detect_family(text)
 
@@ -946,6 +963,65 @@ defmodule TradingDesk.Contracts.Parser do
     }}
   end
 
+  defp extract_clause_fields("PENALTY_VOLUME_SHORTFALL", para, section_ref, anchors, _product_group) do
+    penalty_rate = extract_dollar_amount(para)
+
+    case penalty_rate do
+      {:ok, rate} ->
+        {:ok, %Clause{
+          clause_id: "PENALTY_VOLUME_SHORTFALL",
+          type: :penalty,
+          category: :credit_legal,
+          description: para,
+          parameter: :volume_shortfall,
+          operator: :>=,
+          value: 0,
+          unit: "$/ton",
+          penalty_per_unit: rate,
+          reference_section: section_ref,
+          confidence: :high,
+          anchors_matched: anchor_strings(anchors),
+          extracted_fields: %{
+            penalty_rate_per_ton: rate,
+            applies_to: detect_shortfall_party(para)
+          }
+        }}
+
+      :none ->
+        {:warn, "PENALTY_VOLUME_SHORTFALL anchor matched but no dollar amount extracted"}
+    end
+  end
+
+  defp extract_clause_fields("PENALTY_LATE_DELIVERY", para, section_ref, anchors, _product_group) do
+    penalty_rate = extract_dollar_amount(para)
+
+    case penalty_rate do
+      {:ok, rate} ->
+        {:ok, %Clause{
+          clause_id: "PENALTY_LATE_DELIVERY",
+          type: :penalty,
+          category: :credit_legal,
+          description: para,
+          parameter: :late_delivery,
+          operator: :>=,
+          value: 0,
+          unit: "$/ton",
+          penalty_per_unit: rate,
+          penalty_cap: extract_penalty_cap(para),
+          reference_section: section_ref,
+          confidence: :high,
+          anchors_matched: anchor_strings(anchors),
+          extracted_fields: %{
+            penalty_rate_per_ton: rate,
+            applies_to: :seller
+          }
+        }}
+
+      :none ->
+        {:warn, "PENALTY_LATE_DELIVERY anchor matched but no dollar amount extracted"}
+    end
+  end
+
   defp extract_clause_fields("DEFAULT_AND_REMEDIES", para, section_ref, anchors, _product_group) do
     cure_hours = extract_field_value(para, ~r/(\d+)\s*hours?\s*/i)
     interest_rate = extract_field_value(para, ~r/([\d.]+)\s*%\s*(?:per\s+annum|interest)/i)
@@ -1285,8 +1361,92 @@ defmodule TradingDesk.Contracts.Parser do
     end)
   end
 
+  defp detect_shortfall_party(para) do
+    cond do
+      Regex.match?(~r/\b[Bb]uyer\s+(?:shall\s+)?(?:pay|compensate)\b/i, para) -> :buyer
+      Regex.match?(~r/\b[Ss]eller\s+(?:shall\s+)?(?:pay|compensate)\b/i, para) -> :seller
+      Regex.match?(~r/\b[Bb]uyer\s+fails\b/i, para) -> :buyer
+      Regex.match?(~r/\b[Ss]eller\s+fails\b/i, para) -> :seller
+      true -> nil
+    end
+  end
+
   defp elem_or_nil({:ok, val}), do: val
   defp elem_or_nil(_), do: nil
+
+  # ──────────────────────────────────────────────────────────
+  # EMBEDDED PENALTY EXTRACTION
+  # ──────────────────────────────────────────────────────────
+  #
+  # Penalty sub-clauses ("Penalty for volume shortfall", "Penalty for late
+  # delivery") are typically embedded within the DEFAULT_AND_REMEDIES section.
+  # The heading merger combines them into one large paragraph, so the main
+  # pass only matches DEFAULT_AND_REMEDIES. This second pass scans all
+  # paragraphs for penalty-specific patterns and extracts them as separate
+  # Clause structs.
+
+  defp extract_embedded_penalties(paragraphs, now) do
+    penalty_patterns = [
+      {"PENALTY_VOLUME_SHORTFALL",
+       ~r/[Pp]enalty\s+for\s+volume\s+shortfall[^.]*\$\s*([\d,]+(?:\.\d+)?)\s*per\s+(?:metric\s+)?ton/},
+      {"PENALTY_LATE_DELIVERY",
+       ~r/[Pp]enalty\s+for\s+late\s+delivery[^.]*\$\s*([\d,]+(?:\.\d+)?)\s*per\s+(?:metric\s+)?ton/},
+      {"PENALTY_LATE_DELIVERY",
+       ~r/[Ss]eller\s+shall\s+pay\s+[Bb]uyer\s+\$\s*([\d,]+(?:\.\d+)?)\s*per\s+(?:metric\s+)?ton\s+on\s+the\s+delayed/}
+    ]
+
+    Enum.flat_map(paragraphs, fn {section_ref, para} ->
+      Enum.flat_map(penalty_patterns, fn {clause_id, pattern} ->
+        case Regex.run(pattern, para) do
+          [_match, raw_rate] ->
+            cleaned = String.replace(raw_rate, ",", "")
+            case Float.parse(cleaned) do
+              {rate, _} ->
+                applies_to = detect_shortfall_party(para)
+                [%Clause{
+                  id: Clause.generate_id(),
+                  clause_id: clause_id,
+                  type: :penalty,
+                  category: :credit_legal,
+                  description: extract_penalty_sentence(para, clause_id),
+                  parameter: if(clause_id == "PENALTY_VOLUME_SHORTFALL", do: :volume_shortfall, else: :late_delivery),
+                  operator: :>=,
+                  value: 0,
+                  unit: "$/ton",
+                  penalty_per_unit: rate,
+                  penalty_cap: extract_penalty_cap(para),
+                  reference_section: section_ref,
+                  confidence: :high,
+                  anchors_matched: [Regex.source(pattern)],
+                  extracted_fields: %{penalty_rate_per_ton: rate, applies_to: applies_to},
+                  extracted_at: now
+                }]
+              :error -> []
+            end
+          nil -> []
+        end
+      end)
+    end)
+  end
+
+  # Extract just the sentence containing the penalty for a cleaner description
+  defp extract_penalty_sentence(para, "PENALTY_VOLUME_SHORTFALL") do
+    case Regex.run(~r/(Penalty\s+for\s+volume\s+shortfall[^.]+\.)/i, para) do
+      [_, sentence] -> String.trim(sentence)
+      _ -> String.slice(para, 0, 200)
+    end
+  end
+  defp extract_penalty_sentence(para, "PENALTY_LATE_DELIVERY") do
+    case Regex.run(~r/(Penalty\s+for\s+late\s+delivery[^.]+\.)/i, para) do
+      [_, sentence] -> String.trim(sentence)
+      _ ->
+        case Regex.run(~r/(Seller\s+shall\s+pay\s+Buyer[^.]+delayed[^.]+\.)/i, para) do
+          [_, sentence] -> String.trim(sentence)
+          _ -> String.slice(para, 0, 200)
+        end
+    end
+  end
+  defp extract_penalty_sentence(para, _), do: String.slice(para, 0, 200)
 
   # ──────────────────────────────────────────────────────────
   # DEDUPLICATION

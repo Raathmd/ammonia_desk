@@ -7,7 +7,7 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
   the system maps to a family signature, and every family lists the
   canonical clause IDs it expects.
 
-  The 28 canonical clauses are the single source of truth. The parser
+  The 30 canonical clauses are the single source of truth. The parser
   must extract each clause by its anchor patterns. The validator checks
   extraction completeness against the family's expected clause list.
 
@@ -244,6 +244,20 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
       extract_fields: [:hardship_present, :reps_present],
       lp_mapping: nil,
       level_default: :expected
+    },
+    "PENALTY_VOLUME_SHORTFALL" => %{
+      category: :credit_legal,
+      anchors: ["Penalty for volume shortfall", "shortfall volume"],
+      extract_fields: [:penalty_rate_per_ton, :applies_to],
+      lp_mapping: [:volume_shortfall],
+      level_default: :expected
+    },
+    "PENALTY_LATE_DELIVERY" => %{
+      category: :credit_legal,
+      anchors: ["Penalty for late delivery", "late delivery", "delayed cargo"],
+      extract_fields: [:penalty_rate_per_ton, :applies_to],
+      lp_mapping: [:late_delivery],
+      level_default: :expected
     }
   }
 
@@ -270,7 +284,8 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
         "VESSEL_ELIGIBILITY", "INSPECTION_AND_QTY_DETERMINATION",
         "DOCUMENTS_AND_CERTIFICATES", "EXPORT_IMPORT_REACH",
         "WAR_RISK_AND_ROUTE_CLOSURE", "FORCE_MAJEURE",
-        "DEFAULT_AND_REMEDIES", "CLAIMS_NOTICE_AND_LIMITS",
+        "DEFAULT_AND_REMEDIES", "PENALTY_VOLUME_SHORTFALL", "PENALTY_LATE_DELIVERY",
+        "CLAIMS_NOTICE_AND_LIMITS",
         "GOVERNING_LAW_AND_ARBITRATION", "NOTICES", "MISCELLANEOUS_BOILERPLATE"
       ]
     },
@@ -292,7 +307,8 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
         "INSPECTION_AND_QTY_DETERMINATION", "INSURANCE", "LOI",
         "TAXES_FEES_DUES", "EXPORT_IMPORT_REACH",
         "WAR_RISK_AND_ROUTE_CLOSURE", "FORCE_MAJEURE",
-        "DEFAULT_AND_REMEDIES", "WARRANTY_DISCLAIMER",
+        "DEFAULT_AND_REMEDIES", "PENALTY_VOLUME_SHORTFALL", "PENALTY_LATE_DELIVERY",
+        "WARRANTY_DISCLAIMER",
         "CLAIMS_NOTICE_AND_LIMITS", "GOVERNING_LAW_AND_ARBITRATION",
         "NOTICES", "MISCELLANEOUS_BOILERPLATE"
       ]
@@ -313,7 +329,9 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
         "CHARTERPARTY_ASBATANKVOY_INCORP",
         "INSPECTION_AND_QTY_DETERMINATION", "LOI", "TAXES_FEES_DUES",
         "EXPORT_IMPORT_REACH", "WAR_RISK_AND_ROUTE_CLOSURE",
-        "FORCE_MAJEURE", "DEFAULT_AND_REMEDIES", "WARRANTY_DISCLAIMER",
+        "FORCE_MAJEURE", "DEFAULT_AND_REMEDIES",
+        "PENALTY_VOLUME_SHORTFALL", "PENALTY_LATE_DELIVERY",
+        "WARRANTY_DISCLAIMER",
         "CLAIMS_NOTICE_AND_LIMITS", "GOVERNING_LAW_AND_ARBITRATION",
         "NOTICES", "MISCELLANEOUS_BOILERPLATE"
       ]
@@ -331,7 +349,8 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
         "INCOTERMS", "PRODUCT_AND_SPECS", "PRICE", "PAYMENT",
         "LAYTIME_DEMURRAGE", "INSPECTION_AND_QTY_DETERMINATION",
         "WARRANTY_DISCLAIMER", "CLAIMS_NOTICE_AND_LIMITS",
-        "DEFAULT_AND_REMEDIES", "FORCE_MAJEURE", "TAXES_FEES_DUES",
+        "DEFAULT_AND_REMEDIES", "PENALTY_VOLUME_SHORTFALL", "PENALTY_LATE_DELIVERY",
+        "FORCE_MAJEURE", "TAXES_FEES_DUES",
         "NOTICES", "GOVERNING_LAW_AND_ARBITRATION",
         "MISCELLANEOUS_BOILERPLATE"
       ]
@@ -348,7 +367,9 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
       expected_clause_ids: [
         "INCOTERMS", "PRODUCT_AND_SPECS", "PRICE", "PAYMENT",
         "INSPECTION_AND_QTY_DETERMINATION", "LAYTIME_DEMURRAGE",
-        "FORCE_MAJEURE", "DEFAULT_AND_REMEDIES", "WARRANTY_DISCLAIMER",
+        "FORCE_MAJEURE", "DEFAULT_AND_REMEDIES",
+        "PENALTY_VOLUME_SHORTFALL", "PENALTY_LATE_DELIVERY",
+        "WARRANTY_DISCLAIMER",
         "CLAIMS_NOTICE_AND_LIMITS", "GOVERNING_LAW_AND_ARBITRATION",
         "NOTICES", "MISCELLANEOUS_BOILERPLATE"
       ]
@@ -369,7 +390,8 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
         "LAYTIME_DEMURRAGE", "CHARTERPARTY_ASBATANKVOY_INCORP",
         "LOI", "TAXES_FEES_DUES", "EXPORT_IMPORT_REACH",
         "WAR_RISK_AND_ROUTE_CLOSURE", "FORCE_MAJEURE",
-        "DEFAULT_AND_REMEDIES", "WARRANTY_DISCLAIMER",
+        "DEFAULT_AND_REMEDIES", "PENALTY_VOLUME_SHORTFALL", "PENALTY_LATE_DELIVERY",
+        "WARRANTY_DISCLAIMER",
         "CLAIMS_NOTICE_AND_LIMITS", "GOVERNING_LAW_AND_ARBITRATION",
         "NOTICES", "MISCELLANEOUS_BOILERPLATE",
         "HARDSHIP_AND_REPRESENTATIONS"
@@ -392,7 +414,8 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
         "CHARTERPARTY_ASBATANKVOY_INCORP", "LAYTIME_DEMURRAGE",
         "TAXES_FEES_DUES", "EXPORT_IMPORT_REACH",
         "WAR_RISK_AND_ROUTE_CLOSURE", "FORCE_MAJEURE",
-        "DEFAULT_AND_REMEDIES", "GOVERNING_LAW_AND_ARBITRATION",
+        "DEFAULT_AND_REMEDIES", "PENALTY_VOLUME_SHORTFALL", "PENALTY_LATE_DELIVERY",
+        "GOVERNING_LAW_AND_ARBITRATION",
         "NOTICES", "MISCELLANEOUS_BOILERPLATE"
       ]
     }
@@ -738,6 +761,8 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
   defp clause_id_to_type("QUANTITY_TOLERANCE"), do: :obligation
   defp clause_id_to_type("PRICE"), do: :price_term
   defp clause_id_to_type("LAYTIME_DEMURRAGE"), do: :penalty
+  defp clause_id_to_type("PENALTY_VOLUME_SHORTFALL"), do: :penalty
+  defp clause_id_to_type("PENALTY_LATE_DELIVERY"), do: :penalty
   defp clause_id_to_type("FORCE_MAJEURE"), do: :condition
   defp clause_id_to_type("DEFAULT_AND_REMEDIES"), do: :condition
   defp clause_id_to_type("DATES_WINDOWS_NOMINATIONS"), do: :delivery
@@ -750,6 +775,8 @@ defmodule TradingDesk.Contracts.TemplateRegistry do
   defp clause_id_to_param_class("QUANTITY_TOLERANCE"), do: :volume
   defp clause_id_to_param_class("PRICE"), do: :buy_price
   defp clause_id_to_param_class("LAYTIME_DEMURRAGE"), do: :demurrage
+  defp clause_id_to_param_class("PENALTY_VOLUME_SHORTFALL"), do: :volume_shortfall
+  defp clause_id_to_param_class("PENALTY_LATE_DELIVERY"), do: :late_delivery
   defp clause_id_to_param_class("FORCE_MAJEURE"), do: :force_majeure
   defp clause_id_to_param_class("DATES_WINDOWS_NOMINATIONS"), do: :delivery_window
   defp clause_id_to_param_class("PAYMENT"), do: :working_capital
