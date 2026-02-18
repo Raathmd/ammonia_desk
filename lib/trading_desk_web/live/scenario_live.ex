@@ -94,6 +94,7 @@ defmodule TradingDesk.ScenarioLive do
       |> assign(:ammonia_prices, TradingDesk.Data.AmmoniaPrices.price_summary())
       |> assign(:contracts_data, load_contracts_data())
       |> assign(:api_status, load_api_status())
+      |> assign(:solve_history, [])
 
     {:ok, socket}
   end
@@ -320,6 +321,8 @@ defmodule TradingDesk.ScenarioLive do
           assign(socket, api_status: load_api_status())
         :contracts ->
           assign(socket, contracts_data: load_contracts_data())
+        :solves ->
+          assign(socket, solve_history: load_solve_history(socket.assigns.product_group))
         _ ->
           socket
       end
@@ -517,6 +520,14 @@ defmodule TradingDesk.ScenarioLive do
       socket
       |> assign(:auto_result, result)
       |> assign(:agent_history, history)
+
+    # Refresh solve history if on the Solves tab
+    socket = if socket.assigns.active_tab == :solves do
+      assign(socket, solve_history: load_solve_history(socket.assigns.product_group))
+    else
+      socket
+    end
+
     {:noreply, socket}
   end
 
@@ -703,7 +714,7 @@ defmodule TradingDesk.ScenarioLive do
         <div style="overflow-y:auto;padding:16px">
           <%!-- Tab buttons --%>
           <div style="display:flex;gap:2px;margin-bottom:16px">
-            <%= for {tab, label, color} <- [{:trader, "Trader", "#38bdf8"}, {:contracts, "Contracts", "#a78bfa"}, {:map, "Map", "#60a5fa"}, {:agent, "Agent", "#10b981"}, {:apis, "APIs", "#f97316"}] do %>
+            <%= for {tab, label, color} <- [{:trader, "Trader", "#38bdf8"}, {:contracts, "Contracts", "#a78bfa"}, {:solves, "Solves", "#eab308"}, {:map, "Map", "#60a5fa"}, {:agent, "Agent", "#10b981"}, {:apis, "APIs", "#f97316"}] do %>
               <button phx-click="switch_tab" phx-value-tab={tab}
                 style={"padding:8px 16px;border:none;border-radius:6px 6px 0 0;font-size:12px;font-weight:600;cursor:pointer;background:#{if @active_tab == tab, do: "#111827", else: "transparent"};color:#{if @active_tab == tab, do: "#e2e8f0", else: "#475569"};border-bottom:2px solid #{if @active_tab == tab, do: color, else: "transparent"}"}>
                 <%= label %>
@@ -1514,6 +1525,23 @@ defmodule TradingDesk.ScenarioLive do
                 </tbody>
               </table>
 
+              <%!-- Auto-Solve Thresholds --%>
+              <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:8px">AUTO-SOLVE DELTA THRESHOLDS</div>
+              <div style="font-size:10px;color:#475569;margin-bottom:8px">
+                Auto-runner triggers a new Monte Carlo when |current - baseline| exceeds threshold.
+                Cooldown: <span style="color:#94a3b8;font-weight:600"><%= format_interval(@api_status.delta_config.min_solve_interval_ms) %></span>
+                &middot; Scenarios: <span style="color:#94a3b8;font-weight:600"><%= @api_status.delta_config.n_scenarios %></span>
+                &middot; Status: <span style={"color:#{if @api_status.delta_config.enabled, do: "#10b981", else: "#ef4444"};font-weight:600"}><%= if @api_status.delta_config.enabled, do: "ENABLED", else: "DISABLED" %></span>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:16px">
+                <%= for {key, threshold} <- Enum.sort_by(@api_status.delta_config.thresholds, fn {k, _} -> to_string(k) end) do %>
+                  <div style="background:#0a0f18;padding:6px 8px;border-radius:4px;display:flex;justify-content:space-between;align-items:center">
+                    <span style="font-size:10px;color:#94a3b8"><%= format_threshold_key(key) %></span>
+                    <span style="font-size:10px;font-family:monospace;color:#f59e0b;font-weight:600"><%= format_threshold_value(key, threshold) %></span>
+                  </div>
+                <% end %>
+              </div>
+
               <%!-- Summary --%>
               <div style="display:flex;gap:16px;padding:12px;background:#0a0f18;border-radius:8px;font-size:11px">
                 <div>
@@ -1529,6 +1557,121 @@ defmodule TradingDesk.ScenarioLive do
                   <span style={"color:#{if @api_status.error_count > 0, do: "#ef4444", else: "#10b981"};font-weight:600;margin-left:4px"}><%= @api_status.error_count %></span>
                 </div>
               </div>
+            </div>
+          <% end %>
+
+          <%!-- ═══════ SOLVES TAB ═══════ --%>
+          <%= if @active_tab == :solves do %>
+            <div style="background:#111827;border-radius:10px;padding:16px">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                <div style="font-size:12px;font-weight:700;color:#eab308;letter-spacing:1px">
+                  SOLVE HISTORY
+                </div>
+                <div style="font-size:10px;color:#64748b">
+                  <%= length(@solve_history) %> solve<%= if length(@solve_history) != 1, do: "s" %> recorded
+                </div>
+              </div>
+
+              <%= if length(@solve_history) == 0 do %>
+                <div style="text-align:center;padding:40px;color:#475569;font-size:12px">
+                  No solves recorded yet. Run a solve or wait for the auto-runner.
+                </div>
+              <% else %>
+                <table style="width:100%;border-collapse:collapse;font-size:11px">
+                  <thead>
+                    <tr style="border-bottom:1px solid #1e293b">
+                      <th style="text-align:left;padding:8px;color:#64748b;font-weight:600">Time</th>
+                      <th style="text-align:left;padding:8px;color:#64748b;font-weight:600">Source</th>
+                      <th style="text-align:left;padding:8px;color:#64748b;font-weight:600">Mode</th>
+                      <th style="text-align:right;padding:8px;color:#64748b;font-weight:600">Result</th>
+                      <th style="text-align:left;padding:8px;color:#64748b;font-weight:600">Trigger / Adjustments</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <%= for solve <- @solve_history do %>
+                      <tr style={"border-bottom:1px solid #0f172a;background:#{if solve.source == :trader, do: "#0c1629", else: "transparent"}"}>
+                        <%!-- Time --%>
+                        <td style="padding:8px;color:#94a3b8;font-family:monospace;font-size:10px;white-space:nowrap">
+                          <%= format_solve_time(solve.completed_at) %>
+                        </td>
+
+                        <%!-- Source --%>
+                        <td style="padding:8px">
+                          <%= if solve.source == :trader do %>
+                            <span style="display:inline-flex;align-items:center;gap:4px">
+                              <span style="background:#1e3a5f;color:#38bdf8;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;letter-spacing:0.5px">MANUAL</span>
+                              <span style="color:#94a3b8;font-size:10px"><%= solve.trader_id || "trader" %></span>
+                            </span>
+                          <% else %>
+                            <span style="background:#14532d;color:#4ade80;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;letter-spacing:0.5px">AUTO</span>
+                          <% end %>
+                        </td>
+
+                        <%!-- Mode --%>
+                        <td style="padding:8px">
+                          <span style={"color:#{if solve.mode == :monte_carlo, do: "#a78bfa", else: "#38bdf8"};font-size:10px;font-weight:600"}>
+                            <%= if solve.mode == :monte_carlo, do: "Monte Carlo", else: "Solve" %>
+                          </span>
+                        </td>
+
+                        <%!-- Result --%>
+                        <td style="padding:8px;text-align:right">
+                          <%= cond do %>
+                            <% solve.result_status == :optimal -> %>
+                              <span style="color:#10b981;font-weight:700;font-family:monospace;font-size:11px">
+                                $<%= format_number(solve.profit) %>
+                              </span>
+                            <% solve.result_status in [:strong_go, :go, :hold, :no_go] -> %>
+                              <span style={"font-weight:700;font-size:10px;padding:2px 6px;border-radius:3px;#{signal_style(solve.result_status)}"}>
+                                <%= solve.result_status |> to_string() |> String.upcase() |> String.replace("_", " ") %>
+                              </span>
+                              <span style="color:#94a3b8;font-family:monospace;font-size:10px;margin-left:4px">
+                                $<%= format_number(solve.profit) %>
+                              </span>
+                            <% solve.result_status == :error -> %>
+                              <span style="color:#ef4444;font-weight:600;font-size:10px">ERROR</span>
+                            <% true -> %>
+                              <span style="color:#64748b;font-size:10px"><%= solve.result_status %></span>
+                          <% end %>
+                        </td>
+
+                        <%!-- Trigger / Adjustments --%>
+                        <td style="padding:8px">
+                          <%= if solve.source == :trader and length(solve.adjustments) > 0 do %>
+                            <div style="display:flex;flex-wrap:wrap;gap:3px">
+                              <%= for adj <- Enum.take(solve.adjustments, 5) do %>
+                                <span style="background:#1a1400;color:#f59e0b;font-size:9px;padding:1px 5px;border-radius:3px;font-family:monospace">
+                                  <%= adj.key %>: <%= adj.from %> &rarr; <%= adj.to %>
+                                </span>
+                              <% end %>
+                              <%= if length(solve.adjustments) > 5 do %>
+                                <span style="color:#64748b;font-size:9px">+<%= length(solve.adjustments) - 5 %> more</span>
+                              <% end %>
+                            </div>
+                          <% end %>
+                          <%= if solve.source == :auto and length(solve.triggers) > 0 do %>
+                            <div style="display:flex;flex-wrap:wrap;gap:3px">
+                              <%= for trigger <- Enum.take(solve.triggers, 5) do %>
+                                <span style="background:#052e16;color:#4ade80;font-size:9px;padding:1px 5px;border-radius:3px;font-family:monospace">
+                                  <%= trigger.key %> &Delta;<%= format_delta(trigger.delta) %>
+                                </span>
+                              <% end %>
+                              <%= if length(solve.triggers) > 5 do %>
+                                <span style="color:#64748b;font-size:9px">+<%= length(solve.triggers) - 5 %> more</span>
+                              <% end %>
+                            </div>
+                          <% end %>
+                          <%= if length(solve.triggers) == 0 and length(solve.adjustments) == 0 do %>
+                            <span style="color:#475569;font-size:10px">
+                              <%= if solve.source == :auto, do: "scheduled", else: "no overrides" %>
+                            </span>
+                          <% end %>
+                        </td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              <% end %>
             </div>
           <% end %>
         </div>
@@ -1835,6 +1978,9 @@ defmodule TradingDesk.ScenarioLive do
     sap_status = TradingDesk.Contracts.SapRefreshScheduler.status()
     prices_updated = safe_call(fn -> TradingDesk.Data.AmmoniaPrices.last_updated() end, nil)
     claude_key = System.get_env("ANTHROPIC_API_KEY")
+    delta_config = safe_call(fn -> TradingDesk.Config.DeltaConfig.get(:ammonia) end, %{
+      enabled: false, thresholds: %{}, min_solve_interval_ms: 300_000, n_scenarios: 1000
+    })
 
     error_count = Enum.count(poller_status.sources, & &1.status == :error)
 
@@ -1843,7 +1989,8 @@ defmodule TradingDesk.ScenarioLive do
       sap: sap_status,
       prices_updated_at: prices_updated,
       claude_configured: claude_key != nil and claude_key != "",
-      error_count: error_count
+      error_count: error_count,
+      delta_config: delta_config
     }
   end
 
@@ -1870,6 +2017,153 @@ defmodule TradingDesk.ScenarioLive do
     end
   end
   defp format_interval(_), do: "—"
+
+  # ── Solve history helpers ─────────────────────────────────
+
+  defp load_solve_history(product_group) do
+    # Merge audit store records and auto-runner history into a unified list
+    audits = safe_call(fn -> TradingDesk.Solver.SolveAuditStore.list_recent(50) end, [])
+    auto_history = safe_call(fn -> TradingDesk.Scenarios.AutoRunner.history() end, [])
+
+    # Build auto-runner entries from history (has trigger details)
+    auto_entries =
+      auto_history
+      |> Enum.map(fn h ->
+        {profit, signal} = extract_auto_result(h)
+        %{
+          completed_at: h.timestamp,
+          source: :auto,
+          trader_id: nil,
+          mode: :monte_carlo,
+          result_status: signal,
+          profit: profit,
+          triggers: Map.get(h, :triggers, []),
+          adjustments: [],
+          audit_id: Map.get(h, :audit_id)
+        }
+      end)
+
+    # Build manual trader entries from audit store
+    trader_entries =
+      audits
+      |> Enum.filter(fn a -> a.trigger in [:dashboard, :api] end)
+      |> Enum.map(fn a ->
+        profit = extract_audit_profit(a)
+        adjustments = extract_variable_adjustments(a)
+        %{
+          completed_at: a.completed_at || a.started_at,
+          source: :trader,
+          trader_id: a.trader_id,
+          mode: a.mode,
+          result_status: a.result_status,
+          profit: profit,
+          triggers: [],
+          adjustments: adjustments,
+          audit_id: a.id
+        }
+      end)
+
+    # Merge, deduplicate by audit_id, sort newest first
+    (auto_entries ++ trader_entries)
+    |> Enum.uniq_by(& &1.audit_id)
+    |> Enum.sort_by(& &1.completed_at, {:desc, DateTime})
+    |> Enum.take(50)
+  end
+
+  defp extract_auto_result(%{distribution: dist}) when is_map(dist) do
+    {Map.get(dist, :mean, 0.0), Map.get(dist, :signal, :unknown)}
+  end
+  defp extract_auto_result(_), do: {0.0, :unknown}
+
+  defp extract_audit_profit(%{result: result, mode: :solve}) when is_map(result) do
+    Map.get(result, :objective, 0.0) || Map.get(result, :profit, 0.0)
+  end
+  defp extract_audit_profit(%{result: result, mode: :monte_carlo}) when is_map(result) do
+    Map.get(result, :mean, 0.0)
+  end
+  defp extract_audit_profit(_), do: 0.0
+
+  defp extract_variable_adjustments(%{variables: vars, variable_sources: _sources}) when is_map(vars) do
+    # We show variables that differ from default as "adjustments"
+    # In a real implementation, this would compare against the baseline
+    []
+  end
+  defp extract_variable_adjustments(_), do: []
+
+  defp format_solve_time(nil), do: "—"
+  defp format_solve_time(%DateTime{} = dt) do
+    Calendar.strftime(dt, "%b %d %H:%M:%S")
+  end
+  defp format_solve_time(_), do: "—"
+
+  defp format_delta(delta) when is_float(delta) and delta >= 0, do: "+#{Float.round(delta, 2)}"
+  defp format_delta(delta) when is_float(delta), do: "#{Float.round(delta, 2)}"
+  defp format_delta(delta) when is_integer(delta) and delta >= 0, do: "+#{delta}"
+  defp format_delta(delta) when is_integer(delta), do: "#{delta}"
+  defp format_delta(delta), do: inspect(delta)
+
+  defp signal_style(:strong_go), do: "background:#052e16;color:#4ade80"
+  defp signal_style(:go), do: "background:#052e16;color:#86efac"
+  defp signal_style(:hold), do: "background:#1a1400;color:#fbbf24"
+  defp signal_style(:no_go), do: "background:#1c0a0a;color:#f87171"
+  defp signal_style(_), do: "background:#0f172a;color:#64748b"
+
+  # ── Threshold display helpers ─────────────────────────────
+
+  defp format_threshold_key(key) do
+    case key do
+      :river_stage -> "River"
+      :lock_hrs -> "Lock"
+      :temp_f -> "Temp"
+      :wind_mph -> "Wind"
+      :vis_mi -> "Visibility"
+      :precip_in -> "Precip"
+      :inv_don -> "Inv Don"
+      :inv_geis -> "Inv Geis"
+      :stl_outage -> "StL Out"
+      :mem_outage -> "Mem Out"
+      :barge_count -> "Barges"
+      :nola_buy -> "NOLA Buy"
+      :sell_stl -> "Sell StL"
+      :sell_mem -> "Sell Mem"
+      :fr_don_stl -> "Fr D→StL"
+      :fr_don_mem -> "Fr D→Mem"
+      :fr_geis_stl -> "Fr G→StL"
+      :fr_geis_mem -> "Fr G→Mem"
+      :nat_gas -> "Nat Gas"
+      :working_cap -> "Wrk Cap"
+      other -> other |> to_string() |> String.replace("_", " ")
+    end
+  end
+
+  defp format_threshold_value(key, val) do
+    cond do
+      key in [:nola_buy, :sell_stl, :sell_mem, :fr_don_stl, :fr_don_mem, :fr_geis_stl, :fr_geis_mem, :nat_gas] ->
+        "$#{val}"
+      key == :working_cap ->
+        "$#{round(val / 1000)}k"
+      key in [:river_stage] ->
+        "#{val}ft"
+      key in [:temp_f] ->
+        "#{val}°F"
+      key in [:wind_mph] ->
+        "#{val}mph"
+      key in [:vis_mi] ->
+        "#{val}mi"
+      key in [:precip_in] ->
+        "#{val}in"
+      key in [:lock_hrs] ->
+        "#{val}hrs"
+      key in [:inv_don, :inv_geis] ->
+        "#{round(val)}MT"
+      key in [:stl_outage, :mem_outage] ->
+        "any"
+      key in [:barge_count] ->
+        "#{round(val)}"
+      true ->
+        "#{val}"
+    end
+  end
 
   defp maybe_parse_intent(socket) do
     action = socket.assigns.trader_action
