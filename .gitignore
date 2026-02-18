@@ -32,6 +32,7 @@ ammonia_desk-*.tar
 /native/solver
 /native/**/*.o
 /native/priv/
+/native/HiGHS/
 
 # Temporary files
 new_render.txt
