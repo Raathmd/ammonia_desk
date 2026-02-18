@@ -1,0 +1,115 @@
+Sale Contract for Barge, Rail and Trucks
+
+Contract No.: TRAMMO-DS-2026-0108
+Date: December 20, 2025
+Effective: January 1, 2026
+Term: January 1, 2026 through December 31, 2026
+
+BETWEEN:
+Trammo, Inc. — Ammonia Division ("Seller")
+AND:
+Nutrien Ltd. — St. Louis Distribution ("Buyer")
+
+TRAMMO GENERAL TERMS AND CONDITIONS (SALES)
+
+1. PRODUCT AND SPECIFICATIONS
+
+Product: Anhydrous Ammonia
+Specifications: Minimum purity 99.5%, water content maximum 0.5%,
+oil content maximum 5 ppm.
+
+2. QUANTITY
+
+Quarterly Quantity: 5,000 metric tons per quarter +/- 10% more or less
+at buyer's option. Annual total: 20,000 metric tons. Individual barge lots
+of approximately 1,500 metric tons each. Minimum of three (3) barge lots
+per quarter.
+
+3. INCOTERMS
+
+INCOTERMS 2020: FOB Seller's barge loading terminal, Donaldsonville, Louisiana,
+or FOB Geismar, Louisiana, at Seller's option.
+
+4. PRICE
+
+Price: US $415.00 per metric ton FOB barge. Price subject to quarterly
+adjustment based on published Fertecon NOLA barge assessment. Price floor
+of $380.00 per metric ton. Price ceiling of $465.00 per metric ton.
+
+5. SHIPMENTS AND NOMINATIONS
+
+Shipments / nominations: Buyer shall nominate individual barge lots with
+10 days prior notice. Monthly nominations to be spread across the quarter.
+Buyer shall provide quarterly nomination 20 days before start of each
+quarter. Seller shall confirm availability within 3 business days.
+
+6. PAYMENT
+
+Payment: By telegraphic transfer within 20 days from bill of lading date.
+Late payment interest at 2% per annum above SOFR. Standby letter of credit
+may be required at Seller's discretion.
+
+7. INSPECTION AND QUANTITY DETERMINATION
+
+Inspection: Bill of lading quantity shall be final and binding for barge
+shipments. Quantity determined by certified shore tank gauging at Seller's
+terminal prior to loading.
+
+8. LAYTIME AND DEMURRAGE
+
+Laytime: Barge laytime shall be 36 running hours from time of NOR.
+Demurrage: $7,500 per day or pro rata for barge demurrage. Demurrage
+claims must be submitted within 60 calendar days from completion of
+loading.
+
+9. FORCE MAJEURE
+
+Force Majeure: Neither party shall be liable for delays caused by Force
+Majeure events including but not limited to: floods, hurricanes, lock
+closures, river stage below 9 feet at Cairo gauge, ice conditions,
+government orders, labor disputes, or equipment failure beyond reasonable
+control. Notice within 3 days. River stage below 9 feet at Cairo gauge
+shall entitle either party to suspend barge deliveries without penalty.
+
+10. DEFAULT AND REMEDIES
+
+Event of Default: Material default not remedied within 48 hours of notice
+entitles termination. Interest at 2% per annum on late payments. Mutual
+right of setoff and netting is preserved.
+
+Penalty for volume shortfall: If Seller fails to deliver the minimum
+quarterly quantity (net of tolerance), Seller shall pay Buyer $12.00 per
+metric ton on the shortfall volume. If Buyer fails to accept the minimum
+quarterly quantity, Buyer shall pay Seller $10.00 per metric ton on the
+shortfall.
+
+Penalty for late delivery: If Seller fails to deliver within 5 days of
+the nominated barge schedule, Seller shall pay Buyer $8.00 per metric ton
+on the delayed volume.
+
+11. DISCLAIMER OF WARRANTIES
+
+Disclaimer of Warranties: SELLER MAKES NO WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY.
+
+12. CLAIMS
+
+Claims: Written notice of claim within 30 days of delivery. Claims shall
+be absolutely barred unless action is commenced within one year from date
+of delivery.
+
+13. GOVERNING LAW AND ARBITRATION
+
+Governing Law: Laws of the State of New York shall govern this contract.
+Arbitration: Disputes shall be settled by arbitration under SMA rules
+in New York.
+
+14. NOTICES
+
+Notices: Notices deemed to be given when sent by courier, fax, or e-mail.
+
+15. MISCELLANEOUS
+
+Miscellaneous: Entire Agreement of the parties. Modifications in writing
+only. No Waiver of breach implies waiver of future breach. Assignment
+requires consent. Severability applies.

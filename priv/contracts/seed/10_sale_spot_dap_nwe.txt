@@ -1,0 +1,161 @@
+DAP Sale Contract
+
+Contract No.: TRAMMO-DAP-2026-0110
+Date: February 10, 2026
+
+BETWEEN:
+Trammo DMCC ("Seller")
+AND:
+BASF SE ("Buyer")
+
+TRAMMO GENERAL TERMS AND CONDITIONS (DAP SALES)
+
+1. PRODUCT AND SPECIFICATIONS
+
+Product Specifications: Anhydrous Ammonia (NH3)
+  Purity: minimum 99.8%
+  Water: maximum 0.15%
+  Oil: maximum 3 ppm
+
+2. QUANTITY
+
+Quantity: 15,000 metric tons +/- 3% more or less at buyer's option.
+
+3. INCOTERMS
+
+INCOTERMS 2020: DAP Ludwigshafen, Germany.
+
+4. ORIGIN
+
+Origin: Any origin acceptable to terminal operator. Seller has the right but
+not the obligation to source from alternate origin. Product must meet EU
+import specifications and REACH registration requirements.
+
+5. PRICE
+
+Price: US $470.00 per metric ton DAP delivery point. This is a fixed price
+inclusive of all freight, insurance, and transport costs to the named place.
+
+EU duty adjustment formula: DAP price divided by 0.9419 for non-duty-free
+origins.
+
+6. PORT(S) OF DISCHARGE
+
+Port of Discharge: One safe port, one safe berth, Rotterdam/Europoort area
+for transshipment. Final delivery via Rhine barge to Ludwigshafen.
+Minimum draft of 12 meters at discharge berth.
+
+7. ARRIVAL DATES
+
+Arrival Dates: During the period March 15 - April 5, 2026.
+Seller to give 10 days prior notice of expected vessel arrival.
+
+8. PAYMENT
+
+Payment: By telegraphic transfer within 30 days from delivery date at
+Ludwigshafen. Buyer may provide a standby letter of credit in lieu of
+prepayment if requested by Seller.
+
+9. LAYTIME AND DEMURRAGE
+
+Discharge Rate and Demurrage: Discharge rate of 400 mt per hour at
+Rotterdam. Rhine barge turnaround not to exceed 48 hours.
+Laytime shall be calculated per B/L quantity divided by the agreed rate.
+Demurrage: $30,000 per day or pro rata. Claims within 60 calendar days
+from completion of discharge.
+
+10. CHARTER PARTY
+
+The Charter Party (ASBATANKVOY form) is incorporated by reference.
+For the purposes of this agreement, Seller acts as "owner."
+
+11. VESSEL CLASSIFICATION AND ELIGIBILITY
+
+Vessel Classification and Eligibility: Vessel must be classified by an IACS
+member society. P&I coverage must be provided by an International Group club.
+ISPS Code compliance is mandatory.
+
+12. INSPECTION
+
+Inspection: Seller's certified weight/measurement at loading port shall be
+final and binding for invoicing. An independent inspector appointed by
+Seller at loading port.
+
+13. INSURANCE
+
+Insurance: Seller shall arrange cargo insurance on an all risk basis for not
+less than 110% CIF value. War strike riot coverage included. Insurance to
+cover full transit including Rhine barge leg.
+
+14. LETTER OF INDEMNITY
+
+LOI: Seller may discharge without presentation of an original Bill of Lading
+against provision of a Letter of Indemnity in P&I Club approved form.
+No bank guarantee shall be required.
+
+15. TAXES, FEES AND DUES
+
+Taxes, Fees and Dues: All import taxes, duties, VAT and fees at destination
+shall be added to the sale price and are Buyer's responsibility. Export costs
+at origin for Seller's account. EU import duty for Buyer's account.
+
+16. COMPLIANCE WITH EXPORT AND IMPORT LAWS
+
+Compliance with Import Laws: The import of ammonia into Germany is not
+prohibited. Product is registered under REACH (EC No. 231-635-3).
+Safety Data Sheet shall be provided.
+
+17. WAR RISK
+
+War Risk: Costs arising from areas listed by Joint War Committee shall be
+for Buyer's account. In case of Main Shipping Routes Closure affecting the
+delivery route, both parties shall negotiate in good faith.
+
+18. FORCE MAJEURE
+
+Force Majeure: Neither party liable for failure caused by Force Majeure.
+Notification required within 5 days notice. Obligations suspended for the
+duration of the Force Majeure event. Rhine navigation closures exceeding
+14 days shall constitute Force Majeure.
+
+19. DEFAULT AND REMEDIES
+
+Event of Default: Material breach not cured within 48 hours entitles the
+non-defaulting party to terminate. Interest on overdue amounts at 2% per
+annum above EURIBOR. Right of setoff and netting preserved.
+
+Penalty for late delivery: If Seller fails to deliver within the agreed
+arrival window, Seller shall pay Buyer $25.00 per metric ton on the
+delayed volume as liquidated damages.
+
+20. EXCLUSION OF WARRANTIES
+
+Disclaimer of Warranties: SELLER MAKES NO WARRANTY, EXPRESS OR IMPLIED,
+AS TO MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE.
+
+21. CLAIMS
+
+Claims: Notice of any claim within 15 days of delivery. All claims
+absolutely barred after one year.
+
+22. GOVERNING LAW AND ARBITRATION
+
+Governing Law: This contract shall be governed by English law.
+Arbitration: Disputes to be resolved under LMAA terms in London.
+
+23. NOTICES
+
+Notices: All notices deemed to be given when sent via courier, fax, or
+e-mail to the addresses set forth herein.
+
+24. MISCELLANEOUS
+
+Miscellaneous: This document constitutes the Entire Agreement. No oral
+Modifications are binding. Waiver of one breach is not waiver of another.
+Assignment only with consent. Severability applies to all provisions.
+
+25. HARDSHIP
+
+Hardship: If the fundamental equilibrium of this contract is substantially
+altered due to unforeseen circumstances, either party may request renegotiation
+in good faith.
